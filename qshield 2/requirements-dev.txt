@@ -1,0 +1,5 @@
+-r requirements.txt
+pytest>=8
+# Independent pure-Python ML-KEM, used ONLY by the tests as a second opinion.
+# It is not used by the app (it is not meant for production use).
+kyber-py>=1.2

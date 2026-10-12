@@ -1,0 +1,6 @@
+[server]
+# Biggest file the uploader accepts, in megabytes. Small is fine for a hackathon demo.
+maxUploadSize = 25
+
+[browser]
+gatherUsageStats = false

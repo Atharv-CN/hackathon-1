@@ -1,0 +1,3 @@
+streamlit>=1.35
+# ML-KEM-768 support needs a recent cryptography. Tested with 50.0.1.
+cryptography>=50.0
