@@ -4,6 +4,7 @@ from datetime import datetime
 
 import streamlit as st
 
+import relay
 from core.file_crypto import DecryptionError
 from core.file_utils import clean_hash_text, human_size, sha256_of_bytes
 from core.pq_transfer import TransferError, WrongRecipientError
@@ -60,6 +61,7 @@ def _show_generate_keys() -> None:
     st.code(keys["public_text"], language=None)
     st.write("**Public-key fingerprint** (read this aloud to the sender to confirm it):")
     st.code(keys["fingerprint_pretty"], language=None)
+    _show_relay_publish(keys)
     st.download_button(
         "Download password-protected private key",
         data=keys["protected_pem"],
@@ -71,6 +73,42 @@ def _show_generate_keys() -> None:
         "Never share the private key or this download with the sender. "
         "QShield does not show the unencrypted private key."
     )
+
+
+def _show_relay_publish(keys: dict) -> None:
+    """Optional: share the PUBLIC key with another device through the relay."""
+    if not relay.is_configured():
+        return
+    if st.button("Share public key with another device", key="relay_publish_pubkey"):
+        try:
+            keys["relay_code"] = relay.put("pubkey", keys["public_text"].encode("utf-8"))
+        except (relay.RelayError, ValueError) as exc:
+            st.error(str(exc))
+    if keys.get("relay_code"):
+        st.write("**Receiver code** (give this to the sender; it points to your public key only):")
+        st.code(keys["relay_code"], language=None)
+
+
+def _show_relay_fetch() -> None:
+    """Optional: fetch an encrypted package the sender left on the relay."""
+    if not relay.is_configured():
+        return
+    code = st.text_input("Package code from the sender (optional)", key="receiver_package_code")
+    if st.button("Fetch package from relay", key="relay_fetch_package"):
+        try:
+            data, name = relay.get(code, "package")
+        except relay.RelayError as exc:
+            st.error(str(exc))
+            return
+        if data is None:
+            st.session_state["fetched_package"] = None
+            st.error("No package found for that code. Check it and try again.")
+        else:
+            st.session_state["fetched_package"] = {"name": name or "package.qshield", "data": data}
+            st.success(f"Fetched {name or 'package'} ({human_size(len(data))}).")
+    fetched = st.session_state.get("fetched_package")
+    if fetched is not None:
+        st.caption(f"Using fetched package: **{fetched['name']}** (an uploaded file takes priority).")
 
 
 def _protected_pem_for_decrypt(source: str):
@@ -110,6 +148,8 @@ def _show_decrypt_section() -> None:
             key="download_session_qshield",
         )
 
+    _show_relay_fetch()
+
     package_file = st.file_uploader(
         "Upload a .qshield package",
         type=["qshield"],
@@ -135,8 +175,13 @@ def _show_decrypt_section() -> None:
     )
 
     if st.button("Decrypt package"):
-        if package_file is None:
-            st.error("Please upload a .qshield package.")
+        fetched = st.session_state.get("fetched_package")
+        if package_file is not None:
+            package_bytes = package_file.getvalue()
+        elif fetched is not None:
+            package_bytes = fetched["data"]
+        else:
+            st.error("Please upload a .qshield package or fetch one with a package code.")
             return
         if not key_password:
             st.error("Please enter the password for your private key.")
@@ -150,7 +195,7 @@ def _show_decrypt_section() -> None:
         st.session_state["last_decrypt_ok"] = False
 
         try:
-            result = decrypt_uploaded_package(package_file.getvalue(), pem, key_password)
+            result = decrypt_uploaded_package(package_bytes, pem, key_password)
         except (WrongRecipientError, TransferError, DecryptionError, ValueError, TypeError) as exc:
             st.error(DECRYPT_FAIL_MESSAGE)
             st.caption(str(exc))

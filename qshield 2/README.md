@@ -145,6 +145,26 @@ Read these limits before you trust it:
 - There has been no independent security audit.
 - The Streamlit app now uses this module. The tabs still run in one browser session, so treat that as a demo of the buttons, not as two separate computers. The sender tab never displays the private key.
 
+## Two-device demo (optional Supabase relay)
+
+If `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` are set, the Sender and Receiver tabs get extra code boxes. Without them the app works exactly as before.
+
+1. In Supabase → SQL Editor, create the table:
+   ```sql
+   create table transfers (
+     id text primary key,
+     kind text not null,
+     payload text not null,
+     filename text,
+     created_at timestamptz default now()
+   );
+   alter table transfers enable row level security;
+   ```
+2. Add `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` (the **secret** key) as environment variables on your host. Never commit them.
+3. Flow: **Receiver** generates keys → "Share public key" → gets a code. **Sender** enters that code, encrypts → "Send to receiver via relay" → gets a package code. **Receiver** enters the package code → "Fetch package" → decrypts.
+
+The relay only ever stores a public key or an already-encrypted package. The private key stays in the receiver's session; download it and re-upload it if the app restarts. Always confirm the public-key fingerprint by voice, because the relay does not prove who uploaded a key.
+
 ## Run the tests
 
 ```
