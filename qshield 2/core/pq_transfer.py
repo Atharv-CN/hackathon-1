@@ -42,7 +42,8 @@ IMPORTANT LIMITS - please read
   - The file name and file size are visible (the name is protected from being
     changed, but it is not secret).
   - This code has not had an independent security audit.
-  - It is not connected to the Streamlit app yet.
+  - The Streamlit Sender and Receiver tabs call this module. Encryption still
+    does not prove who the sender is.
   - If the installed `cryptography` build cannot do ML-KEM, this module STOPS
     with PostQuantumUnavailableError. It never quietly switches to ordinary
     encryption.
@@ -179,6 +180,33 @@ def _password_bytes(password) -> bytes:
     return data
 
 
+def private_key_to_protected_pem(private_key: MLKEM768PrivateKey, password) -> bytes:
+    """Return the private key as password-protected PKCS#8 PEM bytes.
+
+    The PEM is encrypted. It is safe to download or keep in memory. Never print
+    it in logs or show it on the sender's screen.
+    """
+    if not isinstance(private_key, MLKEM768PrivateKey):
+        raise TypeError("private_key must be an ML-KEM-768 private key.")
+    return private_key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.BestAvailableEncryption(_password_bytes(password)),
+    )
+
+
+@_no_fallback
+def load_private_key_from_bytes(data: bytes, password) -> MLKEM768PrivateKey:
+    """Load a private key from PEM bytes made by private_key_to_protected_pem()."""
+    try:
+        key = serialization.load_pem_private_key(bytes(data), _password_bytes(password))
+    except (ValueError, TypeError):
+        raise ValueError("Could not open the key file: wrong password, or the file is damaged.") from None
+    if not isinstance(key, MLKEM768PrivateKey):
+        raise ValueError("This key file is not an ML-KEM-768 private key.")
+    return key
+
+
 def save_private_key(private_key: MLKEM768PrivateKey, path, password, overwrite: bool = False) -> Path:
     """Save the private key to a password-protected file (encrypted PKCS#8 PEM).
 
@@ -186,13 +214,7 @@ def save_private_key(private_key: MLKEM768PrivateKey, path, password, overwrite:
     The file is created readable by its owner only (on Linux and macOS) and an
     existing file is never replaced unless overwrite=True.
     """
-    if not isinstance(private_key, MLKEM768PrivateKey):
-        raise TypeError("private_key must be an ML-KEM-768 private key.")
-    pem = private_key.private_bytes(
-        serialization.Encoding.PEM,
-        serialization.PrivateFormat.PKCS8,
-        serialization.BestAvailableEncryption(_password_bytes(password)),
-    )
+    pem = private_key_to_protected_pem(private_key, password)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     flags = os.O_WRONLY | os.O_CREAT | (os.O_TRUNC if overwrite else os.O_EXCL)
@@ -202,17 +224,9 @@ def save_private_key(private_key: MLKEM768PrivateKey, path, password, overwrite:
     return path
 
 
-@_no_fallback
 def load_private_key(path, password) -> MLKEM768PrivateKey:
     """Load a private key saved by save_private_key()."""
-    data = Path(path).read_bytes()
-    try:
-        key = serialization.load_pem_private_key(data, _password_bytes(password))
-    except (ValueError, TypeError):
-        raise ValueError("Could not open the key file: wrong password, or the file is damaged.") from None
-    if not isinstance(key, MLKEM768PrivateKey):
-        raise ValueError("This key file is not an ML-KEM-768 private key.")
-    return key
+    return load_private_key_from_bytes(Path(path).read_bytes(), password)
 
 
 # ---- Key derivation -----------------------------------------------------------

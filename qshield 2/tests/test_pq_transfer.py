@@ -326,6 +326,15 @@ def test_shared_public_key_text_contains_no_private_key_material(recipient):
     assert base64.urlsafe_b64encode(seed).decode() not in pq.public_key_to_text(recipient.public_key())
 
 
+def test_private_key_can_be_exported_as_protected_pem_without_writing_disk(recipient, recipient_public):
+    pem = pq.private_key_to_protected_pem(recipient, "correct horse battery")
+    assert b"ENCRYPTED PRIVATE KEY" in pem
+    assert recipient.private_bytes_raw() not in pem
+    loaded = pq.load_private_key_from_bytes(pem, "correct horse battery")
+    package = pq.encrypt_for_recipient(SECRET, recipient_public)
+    assert pq.decrypt_package(package, loaded).data == SECRET
+
+
 def test_private_key_can_be_saved_encrypted_and_loaded_again(tmp_path, recipient, recipient_public):
     path = pq.save_private_key(recipient, tmp_path / "me.key", "correct horse battery")
     content = path.read_bytes()

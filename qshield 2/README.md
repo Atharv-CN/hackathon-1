@@ -4,22 +4,23 @@ A 24-hour hackathon prototype for secure file sharing, built with Python and Str
 
 ## Current status (please read)
 
-QShield is at **stage 3**. Here is the honest list:
+QShield is at **stage 4**. Here is the honest list:
 
 | Feature | Status |
 |---|---|
 | File upload (Sender and Receiver) | ✅ Working |
 | File fingerprint (SHA-256, from Python's `hashlib`) | ✅ Working |
 | Checking a file against a fingerprint | ✅ Working |
-| Encryption module (AES-256-GCM, `core/file_crypto.py`) | 🧩 Built and tested, **not connected to the app yet** |
-| Key establishment (ML-KEM-768 + HKDF-SHA256, `core/pq_transfer.py`) | 🧩 Built and tested, **not connected to the app yet** |
+| AES-256-GCM encryption connected to the app | ✅ Working |
+| ML-KEM-768 key establishment connected to the app | ✅ Working |
+| Encrypted file integrity verification (AES-GCM) | ✅ Working |
 | Claiming the whole system is "quantum-resistant" | 🚫 Not claimed (see the limits in the ML-KEM section) |
-| Sender / receiver login | ⏳ Not built yet |
+| Sender identity verification | ⏳ Not built yet (encryption does not prove who sent a file) |
 | Sending over a real network | ⏳ Not built yet |
 
-**Files in the app are still NOT encrypted. Do not upload secret files.** The encryption and key-establishment modules exist and pass their tests, but the Sender and Receiver tabs do not call them yet.
+**Use test files only. Do not upload real secrets.** Encryption is connected, but this is an unaudited hackathon prototype. It does not prove who the sender is.
 
-**Team rule:** never show something as "working" unless real code exists and you have tested it. When you build a feature, update `core/security_status.py` at the same time. Do not use pretend or home-made cryptography. When encryption is added, use a well-known, trusted library.
+**Team rule:** never show something as "working" unless real code exists and you have tested it. When you build a feature, update `core/security_status.py` at the same time. Do not use pretend or home-made cryptography.
 
 ## How to run it
 
@@ -61,11 +62,14 @@ Your browser opens by itself. If it does not, go to http://localhost:8501
 
 ## How to try it
 
-1. Open the **Sender** tab, upload any file, and look at its fingerprint.
-2. Click **Prepare package for receiver**.
-3. Open the **Receiver** tab. Download the file, or scroll down to check a file against a fingerprint.
-4. Change one letter in a copy of the file and check it again. You will see "No match".
-5. Open the **Security Status** tab to see what is working and what is not.
+Use a harmless test file (for example a short `.txt`), never real secrets.
+
+1. Open the **Receiver** tab. Choose a password and click **Generate ML-KEM-768 key pair**.
+2. Copy the public key. Download the password-protected private key and keep it on the receiver side.
+3. Open the **Sender** tab. Upload a test file, paste the public key, click **Encrypt File**, and download the `.qshield` package.
+4. Back on the **Receiver** tab, upload the `.qshield` file, unlock it with the private key and password, and download the recovered original.
+5. Try decrypting with a different key, or flip one byte of the `.qshield` file: you should see a security warning and no download.
+6. Open the **Security Status** tab to see what is working and what is not.
 
 ## The encryption module
 
@@ -139,7 +143,7 @@ Read these limits before you trust it:
 - **No forward secrecy.** If the private key is stolen later, old packages can be opened.
 - The file name and size are visible.
 - There has been no independent security audit.
-- It is **not connected to the Streamlit app yet**. The app's tabs run in one browser session, which cannot show a private key staying on a separate receiving computer. Wiring it in needs a design decision first.
+- The Streamlit app now uses this module. The tabs still run in one browser session, so treat that as a demo of the buttons, not as two separate computers. The sender tab never displays the private key.
 
 ## Run the tests
 
@@ -148,7 +152,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-Add `-v` to see every test name. You should see `86 passed`.
+Add `-v` to see every test name. You should see `98 passed`.
 
 What the tests prove:
 - **Encryption works:** files of many sizes are encrypted and recovered, with and without ML-KEM.
@@ -170,8 +174,9 @@ qshield/
 ├── .streamlit/config.toml  Settings (upload size limit).
 ├── core/                   The "brain": code with no screen layout.
 │   ├── file_utils.py       SHA-256 fingerprint, file size text.
-│   ├── file_crypto.py      AES-256-GCM encrypt / decrypt (not used by the tabs yet).
-│   ├── pq_transfer.py      ML-KEM-768 + HKDF + AES-256-GCM transfer packages (not used by the tabs yet).
+│   ├── file_crypto.py      AES-256-GCM encrypt / decrypt.
+│   ├── pq_transfer.py      ML-KEM-768 + HKDF + AES-256-GCM transfer packages.
+│   ├── transfer_flow.py    Glue used by the Sender and Receiver tabs.
 │   ├── state.py            Shared memory between the tabs.
 │   └── security_status.py  The honest list of working / not-built features.
 ├── views/                  The "screens": what the user sees.
@@ -182,6 +187,7 @@ qshield/
     ├── test_file_crypto.py    Tests for the AES-256-GCM module.
     ├── test_pq_transfer.py    Tests for ML-KEM transfer packages.
     ├── test_mlkem_interop.py  Checks the library's ML-KEM against a second implementation.
+    ├── test_app_integration.py Website encrypt/decrypt flow (no browser).
     └── data/golden_package_v1.json  Saved version-1 package (public TEST key only).
 ```
 
