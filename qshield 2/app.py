@@ -12,7 +12,10 @@ st.set_page_config(page_title="QShield", page_icon="🛡️")
 init_state()
 
 st.title("🛡️ QShield")
-st.caption("24-hour hackathon prototype · secure file sharing (work in progress)")
+st.caption(
+    "24-hour hackathon prototype · ML-KEM-768 + AES-256-GCM file encryption "
+    "(use test files only)"
+)
 
 sender_tab, receiver_tab, status_tab = st.tabs(["Sender", "Receiver", "Security Status"])
 

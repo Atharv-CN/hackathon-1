@@ -1,57 +1,225 @@
-"""Receiver: generate an ML-KEM key pair and decrypt a QShield package."""
+"""Receiver screen: generate keys, decrypt .qshield packages, optional hash check."""
+
+from datetime import datetime
+
 import streamlit as st
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.mlkem import MLKEM768PrivateKey
-from core import pq_transfer as pq
+
+from core.file_crypto import DecryptionError
+from core.file_utils import clean_hash_text, human_size, sha256_of_bytes
+from core.pq_transfer import TransferError, WrongRecipientError
+from core.transfer_flow import create_recipient_key_bundle, decrypt_uploaded_package
+
+
+DECRYPT_FAIL_MESSAGE = (
+    "Security warning: this package could not be opened. The private key may "
+    "be wrong, or the file may have been changed or damaged. QShield will not "
+    "release any file contents."
+)
+
+
+def _show_generate_keys() -> None:
+    st.subheader("1. Generate your keys")
+    st.write(
+        "Make an ML-KEM-768 key pair. Share only the **public** key with the "
+        "sender. Keep the private key on this side, protected by a password."
+    )
+
+    password = st.text_input(
+        "Password to protect your private key",
+        type="password",
+        key="receiver_key_password",
+        help="Required. The private key is saved only in password-protected form.",
+    )
+
+    if st.button("Generate ML-KEM-768 key pair", type="primary"):
+        if not password:
+            st.error("Please enter a password to protect the private key.")
+        else:
+            try:
+                bundle = create_recipient_key_bundle(password)
+            except Exception as exc:
+                st.error(str(exc))
+            else:
+                st.session_state["recipient_keys"] = {
+                    "public_text": bundle.public_text,
+                    "fingerprint": bundle.fingerprint,
+                    "fingerprint_pretty": bundle.fingerprint_pretty,
+                    "protected_pem": bundle.protected_pem,
+                }
+                st.success(
+                    "Key pair created. Copy the public key for the sender, and "
+                    "download your password-protected private key."
+                )
+
+    keys = st.session_state.get("recipient_keys")
+    if keys is None:
+        st.info("Generate a key pair to get a public key you can share.")
+        return
+
+    st.write("**Your public key** (safe to copy and send):")
+    st.code(keys["public_text"], language=None)
+    st.write("**Public-key fingerprint** (read this aloud to the sender to confirm it):")
+    st.code(keys["fingerprint_pretty"], language=None)
+    st.download_button(
+        "Download password-protected private key",
+        data=keys["protected_pem"],
+        file_name="qshield-private-key.pem",
+        mime="application/x-pem-file",
+        key="download_private_key",
+    )
+    st.warning(
+        "Never share the private key or this download with the sender. "
+        "QShield does not show the unencrypted private key."
+    )
+
+
+def _protected_pem_for_decrypt(source: str):
+    keys = st.session_state.get("recipient_keys")
+    if source == "This session's generated key":
+        if keys is None:
+            st.error("Generate a key pair first, or upload a private key file.")
+            return None
+        return keys["protected_pem"]
+
+    uploaded_key = st.session_state.get("receiver_key_file_upload")
+    if uploaded_key is None:
+        st.error("Please upload your password-protected private key file.")
+        return None
+    return uploaded_key.getvalue()
+
+
+def _show_decrypt_section() -> None:
+    st.subheader("2. Decrypt a .qshield package")
+    st.write(
+        "Upload the encrypted package. Unlock it with your private key. "
+        "If the key is wrong or the package was modified, nothing is released."
+    )
+
+    session_package = st.session_state.get("encrypted_package")
+    if session_package is not None:
+        st.caption(
+            "The sender in this same browser session encrypted "
+            f"**{session_package['original_name']}**. You can download that "
+            ".qshield file, or upload one you received another way."
+        )
+        st.download_button(
+            "Download the encrypted package from this session",
+            data=session_package["package_bytes"],
+            file_name=session_package["package_name"],
+            mime="application/octet-stream",
+            key="download_session_qshield",
+        )
+
+    package_file = st.file_uploader(
+        "Upload a .qshield package",
+        type=["qshield"],
+        key="receiver_package_upload",
+    )
+
+    source = st.radio(
+        "Private key to use",
+        ["This session's generated key", "Upload a password-protected key file"],
+        key="receiver_key_source",
+    )
+    if source == "Upload a password-protected key file":
+        st.file_uploader(
+            "Password-protected private key (.pem)",
+            type=["pem", "key"],
+            key="receiver_key_file_upload",
+        )
+
+    key_password = st.text_input(
+        "Private key password",
+        type="password",
+        key="receiver_decrypt_password",
+    )
+
+    if st.button("Decrypt package"):
+        if package_file is None:
+            st.error("Please upload a .qshield package.")
+            return
+        if not key_password:
+            st.error("Please enter the password for your private key.")
+            return
+
+        pem = _protected_pem_for_decrypt(source)
+        if pem is None:
+            return
+
+        st.session_state["recovered_file"] = None
+        st.session_state["last_decrypt_ok"] = False
+
+        try:
+            result = decrypt_uploaded_package(package_file.getvalue(), pem, key_password)
+        except (WrongRecipientError, TransferError, DecryptionError, ValueError, TypeError) as exc:
+            st.error(DECRYPT_FAIL_MESSAGE)
+            st.caption(str(exc))
+            return
+
+        st.session_state["last_decrypt_ok"] = True
+        st.session_state["recovered_file"] = {
+            "name": result.filename,
+            "data": result.data,
+            "opened_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        st.success("Package verified and decrypted. You can download the original file.")
+
+    recovered = st.session_state.get("recovered_file")
+    if recovered is None:
+        return
+
+    st.download_button(
+        "Download recovered file",
+        data=recovered["data"],
+        file_name=recovered["name"],
+        key="download_recovered",
+    )
+    st.caption(
+        f"Recovered **{recovered['name']}** ({human_size(len(recovered['data']))}) "
+        f"at {recovered['opened_at']}. This download is shown only after verification succeeded."
+    )
+
+
+def _show_verify_section() -> None:
+    st.subheader("3. Optional: check a recovered file's fingerprint")
+    st.write(
+        "After decryption, you can compare SHA-256 with a fingerprint the sender "
+        "gave you. Encryption already checked that the package was not changed."
+    )
+
+    received = st.file_uploader("Choose the recovered file", key="receiver_hash_upload")
+    expected_text = st.text_input("Expected SHA-256 fingerprint (64 characters)")
+
+    if st.button("Check file"):
+        if received is None:
+            st.error("Please upload a file first.")
+            return
+        expected = clean_hash_text(expected_text)
+        if len(expected) != 64:
+            st.error("A SHA-256 fingerprint has exactly 64 characters. Please check what you pasted.")
+            return
+
+        actual = sha256_of_bytes(received.getvalue())
+        matched = actual == expected
+        st.session_state["last_check"] = {
+            "file_name": received.name,
+            "matched": matched,
+            "checked_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+        if matched:
+            st.success("✅ Match. The file is exactly what the fingerprint describes.")
+        else:
+            st.error("❌ No match. The file is different from what the sender fingerprinted.")
+            st.write("Fingerprint of the file you uploaded:")
+            st.code(actual, language=None)
 
 
 def show_receiver() -> None:
-    st.header('📥 Receiver — Keys and Decryption')
-    st.subheader('1. Generate a recipient key pair')
-    if st.button('🔑 Generate key pair'):
-        try:
-            st.session_state['recipient_private_key'] = pq.generate_recipient_keypair()
-            st.session_state.pop('recovered_download', None)
-        except pq.PostQuantumUnavailableError as exc:
-            st.error(str(exc))
-    private = st.session_state.get('recipient_private_key')
-    if private is not None:
-        public = private.public_key()
-        st.text_area('Public key — copy and share with sender', pq.public_key_to_text(public), height=120)
-        st.caption('Public key fingerprint: ' + pq.public_key_fingerprint(public))
-        save_password = st.text_input('Password for a backup of your private key', type='password', key='backup_password')
-        if save_password:
-            try:
-                pem = private.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
-                    serialization.BestAvailableEncryption(save_password.encode('utf-8')))
-                st.download_button('⬇️ Download password-protected private key', data=pem,
-                    file_name='qshield-private.pem', mime='application/x-pem-file')
-            except ValueError as exc:
-                st.error(f'Could not protect private key: {exc}')
-        st.warning('Keep your private key and its password secret. A new key pair cannot decrypt packages encrypted for an old key.')
+    st.header("📥 Receiver")
+    st.caption("Use test files only. Do not upload real private keys from other systems.")
+    _show_generate_keys()
     st.divider()
-    st.subheader('2. Decrypt an encrypted package')
-    key_file = st.file_uploader('Optional: upload your password-protected private key (.pem)', type=['pem'], key='private_key_upload')
-    key_password = st.text_input('Password for uploaded key', type='password', key='uploaded_key_password') if key_file else ''
-    package_file = st.file_uploader('Upload an encrypted .qshield package', key='receiver_package_upload')
-    if st.button('🔓 Decrypt and verify', disabled=package_file is None):
-        st.session_state.pop('recovered_download', None)
-        try:
-            selected_private = private
-            if key_file is not None:
-                selected_private = serialization.load_pem_private_key(key_file.getvalue(), password=key_password.encode('utf-8'))
-                if not isinstance(selected_private, MLKEM768PrivateKey):
-                    raise ValueError('Uploaded key is not an ML-KEM-768 private key.')
-            if selected_private is None:
-                st.error('First generate a key pair or upload your saved private key.')
-                return
-            result = pq.decrypt_package(package_file.getvalue(), selected_private)
-        except (ValueError, TypeError, pq.TransferError) as exc:
-            st.error(f'Package rejected or key could not be opened: {exc}')
-        else:
-            st.session_state['recovered_download'] = (result.filename, result.data)
-            st.success('Package integrity verified. File successfully decrypted.')
-    recovered = st.session_state.get('recovered_download')
-    if recovered is not None:
-        st.download_button('⬇️ Download recovered file', data=recovered[1], file_name=recovered[0])
-    st.caption('Package integrity verification is not sender identity verification; digital signatures are not implemented.')
+    _show_decrypt_section()
+    st.divider()
+    _show_verify_section()
