@@ -4,8 +4,10 @@ Every function here calls core/pq_transfer.py (ML-KEM-768 + HKDF-SHA256 +
 AES-256-GCM). The encrypted package format is unchanged.
 """
 
+import time
 from dataclasses import dataclass
 
+from core import identity
 from core.file_crypto import DecryptedFile
 from core.pq_transfer import (
     decrypt_package,
@@ -14,7 +16,9 @@ from core.pq_transfer import (
     load_private_key_from_bytes,
     private_key_to_protected_pem,
     public_key_fingerprint,
+    public_key_from_bytes,
     public_key_from_text,
+    public_key_to_bytes,
     public_key_to_text,
 )
 
@@ -70,3 +74,43 @@ def decrypt_uploaded_package(package_bytes: bytes, protected_pem: bytes, passwor
     """
     private_key = load_private_key_from_bytes(protected_pem, password)
     return decrypt_package(package_bytes, private_key)
+
+
+# ---- Authenticated receiver keys (see core/identity.py) ----------------------------
+@dataclass
+class IdentityBundle:
+    """A receiver's signing identity. protected_pem is encrypted PKCS#8; the raw key is not stored."""
+
+    qshield_id: str
+    protected_pem: bytes
+
+
+def create_identity_bundle(password: str) -> IdentityBundle:
+    if not password:
+        raise ValueError("A password is required to protect the identity key.")
+    key = identity.generate_identity()
+    return IdentityBundle(identity.identity_id(key), identity.identity_to_protected_pem(key, password))
+
+
+def open_identity_bundle(protected_pem: bytes, password: str) -> IdentityBundle:
+    key = identity.load_identity_from_pem(protected_pem, password)
+    return IdentityBundle(identity.identity_id(key), bytes(protected_pem))
+
+
+def sign_key_bundle(protected_identity_pem: bytes, password: str, kem_public_text: str,
+                    previous_seq: int = 0, revoked_key_ids=()) -> tuple[bytes, int]:
+    """Sign the receiver's ML-KEM public key with their identity. Returns (envelope, seq).
+
+    seq is time-based and always greater than previous_seq, so it needs no stored counter."""
+    signer = identity.load_identity_from_pem(protected_identity_pem, password)
+    kem_bytes = public_key_to_bytes(public_key_from_text(kem_public_text))
+    seq = max(int(time.time()), previous_seq + 1)
+    envelope = identity.create_key_bundle(signer, kem_bytes, seq=seq, revoked_key_ids=revoked_key_ids)
+    return envelope, seq
+
+
+def encrypt_for_verified_key(file_bytes: bytes, filename: str, verified: identity.VerifiedKey) -> bytes:
+    """Encrypt for a key that already passed verify_key_bundle(). Nothing else is accepted."""
+    if not isinstance(verified, identity.VerifiedKey):
+        raise TypeError("Only an authenticated key (VerifiedKey) can be used here.")
+    return encrypt_for_recipient(file_bytes, public_key_from_bytes(verified.kem_public_key), filename=filename)

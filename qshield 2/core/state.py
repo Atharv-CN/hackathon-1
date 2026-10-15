@@ -10,6 +10,8 @@ Keys we use:
 - "recovered_file": original file after a successful decrypt (or None)
 - "last_decrypt_ok": True/False/None for the Security Status tab
 - "last_check": the result of the Receiver's most recent hash check (or None)
+- "receiver_identity": Receiver's signing identity (QShield ID + password-protected key)
+- "trust_store": what the Sender has accepted per identity (anti-rollback, key changes)
 """
 
 import streamlit as st
@@ -23,6 +25,8 @@ def init_state() -> None:
         "recovered_file": None,
         "last_decrypt_ok": None,
         "last_check": None,
+        "receiver_identity": None,
+        "trust_store": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:

@@ -49,6 +49,16 @@ def get_feature_list() -> list[dict]:
             ),
         },
         {
+            "Feature": "Relay public-key authentication (signed key bundles)",
+            "Status": WORKING,
+            "Details": (
+                "Keys fetched through the relay are accepted only if signed by the "
+                "QShield ID the sender got from the receiver by another channel. "
+                "Substituted, expired, rolled-back or unsigned keys are rejected. "
+                "Assumes the QShield ID itself was shared over a channel the relay does not control."
+            ),
+        },
+        {
             "Feature": "Claim that the whole system is 'quantum-resistant'",
             "Status": NOT_CLAIMED,
             "Details": (

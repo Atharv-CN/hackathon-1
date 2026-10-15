@@ -1,11 +1,17 @@
 """Tiny Supabase relay so two devices can exchange QShield data.
 
-Only two kinds of data ever go through here:
-  - "pubkey":  a receiver's PUBLIC key (safe to share)
-  - "package": an already-encrypted .qshield package (unreadable without the
-               receiver's private key)
+Only these kinds of data ever go through here:
+  - "keybundle": a SIGNED public-key bundle (see core/identity.py). The relay
+                 is NOT trusted: it cannot forge a bundle, and clients verify
+                 the signature against a QShield ID they got elsewhere.
+  - "package":   an already-encrypted .qshield package (unreadable without the
+                 receiver's private key)
+  - "pubkey":    LEGACY unsigned public key. It can still be read so clients can
+                 explain the problem, but it is never used and cannot be
+                 published any more.
 
-Private keys and original files never touch this module.
+Private keys and original files never touch this module. Nothing returned by
+get() should be trusted just because it was returned.
 
 Setup: see README "Two-device demo". Needs SUPABASE_URL and
 SUPABASE_SERVICE_KEY (environment variables, or Streamlit secrets).
@@ -16,6 +22,7 @@ import os
 import secrets
 
 MAX_BYTES = 5 * 1024 * 1024  # keep demo transfers small
+MAX_BUNDLE_BYTES = 16 * 1024  # signed key bundles are ~2.5 KB
 _client = None
 
 
@@ -55,8 +62,14 @@ def _sb():
 
 def put(kind: str, data: bytes, filename: str | None = None) -> str:
     """Store bytes and return a short code the other device can use."""
-    if kind not in ("pubkey", "package"):
-        raise ValueError("kind must be 'pubkey' or 'package'")
+    if kind == "pubkey":
+        raise ValueError(
+            "Unsigned public keys can no longer be published. Publish a signed key bundle ('keybundle')."
+        )
+    if kind not in ("keybundle", "package"):
+        raise ValueError("kind must be 'keybundle' or 'package'")
+    if kind == "keybundle" and len(data) > MAX_BUNDLE_BYTES:
+        raise RelayError("That key bundle is too large.")
     if len(data) > MAX_BYTES:
         raise RelayError("That is too large for the relay (limit 5 MB). Use a smaller test file.")
     code = secrets.token_urlsafe(6)

@@ -15,6 +15,7 @@ QShield is at **stage 4**. Here is the honest list:
 | ML-KEM-768 key establishment connected to the app | ✅ Working |
 | Encrypted file integrity verification (AES-GCM) | ✅ Working |
 | Claiming the whole system is "quantum-resistant" | 🚫 Not claimed (see the limits in the ML-KEM section) |
+| Relay public-key authentication (signed key bundles + QShield ID) | ✅ Working (see `docs/KEY_AUTHENTICATION.md`) |
 | Sender identity verification | ⏳ Not built yet (encryption does not prove who sent a file) |
 | Sending over a real network | ⏳ Not built yet |
 
@@ -163,7 +164,9 @@ If `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` are set, the Sender and Receiver ta
 2. Add `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` (the **secret** key) as environment variables on your host. Never commit them.
 3. Flow: **Receiver** generates keys → "Share public key" → gets a code. **Sender** enters that code, encrypts → "Send to receiver via relay" → gets a package code. **Receiver** enters the package code → "Fetch package" → decrypts.
 
-The relay only ever stores a public key or an already-encrypted package. The private key stays in the receiver's session; download it and re-upload it if the app restarts. Always confirm the public-key fingerprint by voice, because the relay does not prove who uploaded a key.
+The relay is **not trusted**. It only stores a *signed key bundle* or an already-encrypted package. Public keys are accepted only if signed by the receiver's **QShield ID**, which the sender gets from the receiver by another channel (chat, email, in person). A relay that swaps the key is detected and the file is not encrypted. Details, threat model, rotation and limits: [`docs/KEY_AUTHENTICATION.md`](docs/KEY_AUTHENTICATION.md).
+
+Revised flow: **Receiver** generates keys → **Create QShield identity** → sends the QShield ID to the sender (not via the relay) → **Publish signed key bundle** → gets a code. **Sender** enters the QShield ID and the code, encrypts → "Send to receiver via relay" → package code. **Receiver** enters the package code → "Fetch package" → decrypts. The old unsigned `pubkey` codes are rejected. If you paste a public key by hand instead, confirm its fingerprint with the receiver; QShield cannot verify who owns it.
 
 ## Run the tests
 
@@ -172,7 +175,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-Add `-v` to see every test name. You should see `98 passed`.
+Add `-v` to see every test name. The earlier suite had 98 tests; the key-authentication tests (`tests/test_key_authentication*.py`) are additional.
 
 What the tests prove:
 - **Encryption works:** files of many sizes are encrypted and recovered, with and without ML-KEM.
@@ -197,6 +200,9 @@ qshield/
 │   ├── file_crypto.py      AES-256-GCM encrypt / decrypt.
 │   ├── pq_transfer.py      ML-KEM-768 + HKDF + AES-256-GCM transfer packages.
 │   ├── transfer_flow.py    Glue used by the Sender and Receiver tabs.
+│   ├── identity.py         QShield ID, Ed25519 identity, signed key bundles + verification.
+│   ├── key_directory.py    Safe relay lookup: code + expected QShield ID -> verified key.
+│   ├── trust_store.py      Remembers seq / key / revocations per identity (anti-rollback).
 │   ├── state.py            Shared memory between the tabs.
 │   └── security_status.py  The honest list of working / not-built features.
 ├── views/                  The "screens": what the user sees.
@@ -208,6 +214,8 @@ qshield/
     ├── test_pq_transfer.py    Tests for ML-KEM transfer packages.
     ├── test_mlkem_interop.py  Checks the library's ML-KEM against a second implementation.
     ├── test_app_integration.py Website encrypt/decrypt flow (no browser).
+    ├── test_key_authentication.py      Adversarial tests: key substitution, rollback, revocation, legacy.
+    ├── test_key_authentication_e2e.py  Original attack vs the fix, with real ML-KEM.
     └── data/golden_package_v1.json  Saved version-1 package (public TEST key only).
 ```
 

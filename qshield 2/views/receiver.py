@@ -8,7 +8,14 @@ import relay
 from core.file_crypto import DecryptionError
 from core.file_utils import clean_hash_text, human_size, sha256_of_bytes
 from core.pq_transfer import TransferError, WrongRecipientError
-from core.transfer_flow import create_recipient_key_bundle, decrypt_uploaded_package
+from core.identity import KeyAuthError
+from core.transfer_flow import (
+    create_identity_bundle,
+    create_recipient_key_bundle,
+    decrypt_uploaded_package,
+    open_identity_bundle,
+    sign_key_bundle,
+)
 
 
 DECRYPT_FAIL_MESSAGE = (
@@ -59,8 +66,12 @@ def _show_generate_keys() -> None:
 
     st.write("**Your public key** (safe to copy and send):")
     st.code(keys["public_text"], language=None)
-    st.write("**Public-key fingerprint** (read this aloud to the sender to confirm it):")
+    st.write("**Public-key fingerprint:**")
     st.code(keys["fingerprint_pretty"], language=None)
+    st.caption(
+        "Sending the public key by hand? The sender should confirm this fingerprint "
+        "over a separate channel. Using the relay? Share your QShield ID instead (below)."
+    )
     _show_relay_publish(keys)
     st.download_button(
         "Download password-protected private key",
@@ -76,16 +87,65 @@ def _show_generate_keys() -> None:
 
 
 def _show_relay_publish(keys: dict) -> None:
-    """Optional: share the PUBLIC key with another device through the relay."""
+    """Optional: share a SIGNED key bundle with another device through the relay.
+
+    The relay is untrusted, so the sender must hold your QShield ID (received
+    from you by another channel) to verify the bundle. The ID is not secret."""
     if not relay.is_configured():
         return
-    if st.button("Share public key with another device", key="relay_publish_pubkey"):
+    st.markdown("**Share through the relay (signed)**")
+    ident = st.session_state.get("receiver_identity")
+    password = st.session_state.get("receiver_key_password") or ""
+
+    if ident is None:
+        st.caption(
+            "Create a QShield identity once. Give your QShield ID to the sender by "
+            "chat, email or in person (not through the relay). It lets them verify your key."
+        )
+        if st.button("Create QShield identity", key="create_identity"):
+            if not password:
+                st.error("Enter the password above first; it protects your identity key.")
+            else:
+                try:
+                    st.session_state["receiver_identity"] = vars(create_identity_bundle(password))
+                except Exception as exc:
+                    st.error(str(exc))
+                else:
+                    st.rerun()
+        restore = st.file_uploader("Or restore a saved identity (.pem)", type=["pem"], key="identity_restore")
+        if restore is not None and st.button("Restore identity", key="restore_identity"):
+            try:
+                st.session_state["receiver_identity"] = vars(open_identity_bundle(restore.getvalue(), password))
+            except ValueError as exc:
+                st.error(str(exc))
+            else:
+                st.rerun()
+        return
+
+    st.write("**Your QShield ID** (safe to share; send it to the sender outside the relay):")
+    st.code(ident["qshield_id"], language=None)
+    st.download_button(
+        "Download password-protected identity key",
+        data=ident["protected_pem"],
+        file_name="qshield-identity.pem",
+        mime="application/x-pem-file",
+        key="download_identity_key",
+    )
+    if st.button("Publish signed key bundle to relay", key="relay_publish_bundle"):
+        if not password:
+            st.error("Enter your key password above to sign the bundle.")
+            return
         try:
-            keys["relay_code"] = relay.put("pubkey", keys["public_text"].encode("utf-8"))
-        except (relay.RelayError, ValueError) as exc:
+            envelope, seq = sign_key_bundle(
+                ident["protected_pem"], password, keys["public_text"],
+                previous_seq=keys.get("bundle_seq", 0),
+            )
+            keys["relay_code"] = relay.put("keybundle", envelope)
+            keys["bundle_seq"] = seq
+        except (relay.RelayError, ValueError, KeyAuthError) as exc:
             st.error(str(exc))
     if keys.get("relay_code"):
-        st.write("**Receiver code** (give this to the sender; it points to your public key only):")
+        st.write("**Receiver code** (give this to the sender; it points to a signed key bundle):")
         st.code(keys["relay_code"], language=None)
 
 
