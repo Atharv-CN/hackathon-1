@@ -61,10 +61,13 @@ def test_contents_are_not_visible_in_the_container(key):
     assert b"SUPER-SECRET-MARKER" not in container
 
 
-def test_container_size_is_header_plus_data_plus_16_byte_tag(key):
+def test_container_size_is_header_plus_payload_plus_16_byte_tag(key):
+    """Version 2: 5 visible bytes, a 12-byte nonce, then the encrypted payload (+16-byte tag)."""
     container = encrypt_bytes(b"x" * 100, key, filename="a.txt")
-    _, _, metadata_len = struct.unpack(">4sBI", container[:9])
-    assert len(container) == 9 + 12 + metadata_len + 100 + 16
+    payload = AESGCM(key).decrypt(container[5:17], container[17:], container[:5])
+    (metadata_len,) = struct.unpack(">I", payload[:4])
+    assert len(payload) == 4 + metadata_len + 100
+    assert len(container) == 5 + 12 + len(payload) + 16
 
 
 # =============================================================================
@@ -127,19 +130,22 @@ def test_tampered_file_on_disk_is_rejected_and_nothing_is_written(tmp_path, key)
 # =============================================================================
 # 3. Metadata is authenticated
 # =============================================================================
-def test_changing_the_filename_in_the_header_is_rejected(key):
+def test_the_filename_is_hidden_and_cannot_be_swapped(key):
     container = encrypt_bytes(b"payroll", key, filename="report.txt")
-    assert b"report.txt" in container  # the name is visible (NOT encrypted)
-    forged = container.replace(b"report.txt", b"report.exe", 1)  # same length
-    assert forged != container and len(forged) == len(container)
-    with pytest.raises(DecryptionError):
-        decrypt_bytes(forged, key)
+    assert b"report.txt" not in container  # the name is inside the encryption (version 2)
+    # The old trick of editing the visible name no longer even applies; any edit is caught.
+    for position in range(5, len(container)):
+        forged = bytearray(container)
+        forged[position] ^= 0x01
+        with pytest.raises(DecryptionError):
+            decrypt_bytes(bytes(forged), key)
 
 
-def test_metadata_is_visible_but_contents_are_not(key):
-    """Documents the honest truth: metadata is authenticated, not secret."""
-    container = encrypt_bytes(SECRET, key, filename="visible-name.txt")
-    assert b"visible-name.txt" in container
+def test_metadata_and_contents_are_both_hidden(key):
+    container = encrypt_bytes(SECRET, key, filename="hidden-name.txt")
+    assert b"hidden-name.txt" not in container
+    assert b"filename" not in container and b"original_size" not in container
+    assert b"created_utc" not in container
     assert b"SUPER-SECRET-MARKER" not in container
 
 
@@ -165,7 +171,7 @@ def test_every_encryption_uses_a_new_random_nonce(key):
     nonces = set()
     for _ in range(2000):
         container = encrypt_bytes(b"same data every time", key)
-        nonces.add(container[9:21])  # the 12 nonce bytes
+        nonces.add(container[5:17])  # the 12 nonce bytes (version 2)
     assert len(nonces) == 2000
 
 
@@ -215,17 +221,18 @@ def test_container_can_be_decrypted_with_the_library_directly(key):
     metadata really is the authenticated data."""
     container = encrypt_bytes(SECRET, key, filename="plan.txt")
 
-    magic, version, metadata_len = struct.unpack(">4sBI", container[:9])
-    nonce = container[9:21]
-    metadata = container[21:21 + metadata_len]
-    ciphertext_and_tag = container[21 + metadata_len:]
+    magic, version = struct.unpack(">4sB", container[:5])
+    nonce = container[5:17]
+    ciphertext_and_tag = container[17:]
 
-    assert magic == b"QSHD" and version == 1 and len(nonce) == 12
+    assert magic == b"QSHD" and version == 2 and len(nonce) == 12
     assert len(key) == 32  # AES-256
-    aad = container[:9] + metadata
-    assert AESGCM(key).decrypt(nonce, ciphertext_and_tag, aad) == SECRET
+    payload = AESGCM(key).decrypt(nonce, ciphertext_and_tag, container[:5])
+    (metadata_len,) = struct.unpack(">I", payload[:4])
+    assert b"plan.txt" in payload[4:4 + metadata_len]   # the name lives INSIDE the encryption
+    assert payload[4 + metadata_len:] == SECRET
 
-    # Same data with the metadata left out of the check must FAIL.
+    # The magic and version are the authenticated data: leaving them out must FAIL.
     with pytest.raises(Exception):
         AESGCM(key).decrypt(nonce, ciphertext_and_tag, b"")
 

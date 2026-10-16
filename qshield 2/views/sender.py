@@ -10,7 +10,14 @@ import relay
 from core.file_utils import human_size, sha256_of_bytes
 from core.identity import KeyAuthError
 from core.key_directory import fetch_authenticated_receiver_key
-from core.pq_transfer import public_key_fingerprint, public_key_from_bytes, public_key_from_text
+from core.pq_transfer import (
+    encrypt_for_recipient,
+    public_key_fingerprint,
+    public_key_from_bytes,
+    public_key_from_text,
+    suite_name,
+    suite_of,
+)
 from core.transfer_flow import (
     encrypt_stream_for_verified_key,
     encrypt_stream_to_package,
@@ -28,7 +35,9 @@ def _trust_store() -> TrustStore:
         try:
             store = TrustStore(path) if path else TrustStore()
         except TrustStoreError as exc:
-            st.error(f"{exc} QShield will not continue with an unreadable trust store.")
+            st.error(
+                f"{exc} QShield will not continue with an unreadable trust store."
+            )
             st.stop()
         st.session_state["trust_store"] = store
     return store
@@ -40,12 +49,28 @@ def _show_trust_store_tools(store: TrustStore) -> None:
             st.caption("No receivers remembered yet.")
         for ident, rec in store.records.items():
             st.code(ident, language=None)
-            st.caption(f"Latest bundle number {rec['seq']}; {len(rec['revoked'])} revoked key(s).")
-        st.download_button("Download trust store", data=store.to_json(), file_name="qshield-trust.json", key="dl_trust")
-        up = st.file_uploader("Restore a trust store", type=["json"], key="trust_restore")
-        if up is not None and st.button("Restore trust store", key="restore_trust_btn"):
+            st.caption(
+                f"Latest bundle number {rec['seq']}; "
+                f"{len(rec['revoked'])} revoked key(s)."
+            )
+        st.download_button(
+            "Download trust store",
+            data=store.to_json(),
+            file_name="qshield-trust.json",
+            key="dl_trust",
+        )
+        up = st.file_uploader(
+            "Restore a trust store",
+            type=["json"],
+            key="trust_restore",
+        )
+        if up is not None and st.button(
+            "Restore trust store", key="restore_trust_btn"
+        ):
             try:
-                st.session_state["trust_store"] = TrustStore.from_json(up.getvalue())
+                st.session_state["trust_store"] = TrustStore.from_json(
+                    up.getvalue()
+                )
             except TrustStoreError as exc:
                 st.error(str(exc))
             else:
@@ -56,11 +81,13 @@ def show_sender() -> None:
     st.header("📤 Sender")
     st.write(
         "Upload a **test file** (not real secrets) and paste the receiver's "
-        "public key. QShield encrypts the file with ML-KEM-768 + AES-256-GCM."
+        "public key. QShield uses the algorithm suite that the public key was made "
+        "for (ML-KEM-768, X25519 + ML-KEM-768, or ML-KEM-1024) with AES-256-GCM."
     )
     st.caption(
-        "Encryption hides the file contents from anyone who does not have the "
-        "receiver's private key. It does **not** prove who you are."
+        "Encryption hides the file contents, the file name, the exact size and the "
+        "time from anyone who does not have the receiver's private key. The package "
+        "length is still visible unless you add padding. It does **not** prove who you are."
     )
 
     uploaded = st.file_uploader("Choose a file to encrypt", key="sender_upload")
@@ -86,11 +113,42 @@ def show_sender() -> None:
         "Make a version 1 package (needed to open it in the browser app; no large-file support)",
         key="sender_legacy_package",
     )
+
     manual_confirmed = False
     if public_key_text.strip():
         manual_confirmed = st.checkbox(
             "I confirmed this key's fingerprint with the receiver over a separate channel",
             key="sender_manual_confirmed",
+        )
+
+    PADDING_CHOICES = {
+        "No padding (exact size is visible)": None,
+        "Hide the size roughly (Padmé, up to ~12% bigger)": "padme",
+        "Round up to 64 KB blocks": 64 * 1024,
+        "Round up to 1 MB (smaller files all look alike)": 1024 * 1024,
+    }
+
+    padding_label = st.selectbox(
+        "Hide the file size (optional padding)",
+        list(PADDING_CHOICES),
+        key="sender_padding",
+        disabled=not legacy_package,
+        help=(
+            "Padding is available for version 1 packages. It is added inside "
+            "the encryption, increasing the package size while hiding the "
+            "original file size."
+        ),
+    )
+
+    hide_name = st.checkbox(
+        "Hide the file name in the download name (recommended)",
+        value=True,
+        key="sender_hide_name",
+        help=(
+            "The real file name is stored inside the encryption. This option "
+            "only hides it from the downloaded package's filename."
+        ),
+    )
         )
 
     if uploaded is not None:
@@ -116,28 +174,72 @@ def show_sender() -> None:
             trust = None
             try:
                 if use_relay:
-                    verified = fetch_authenticated_receiver_key(receiver_code, receiver_id, store)
-                    public_key = public_key_from_bytes(verified.kem_public_key)
-                    package = encrypt_stream_for_verified_key(
-                        uploaded, uploaded.name, uploaded.size, verified, legacy=legacy_package
+                    verified = fetch_authenticated_receiver_key(
+                        receiver_code, receiver_id, store
+                    )
+                    public_key = public_key_from_bytes(
+                        verified.kem_public_key
                     )
                     trust = verified
                 else:
-                    public_key = public_key_from_text(public_key_text)
-                    package = encrypt_stream_to_package(
-                        uploaded, uploaded.name, uploaded.size, public_key, legacy=legacy_package
+                    public_key = public_key_from_text(
+                        public_key_text.strip()
                     )
+
+                # Streaming version 2 currently supports ML-KEM-768 only.
+                # Other suites must use the compatible version 1 format.
+                stream_supported = suite_of(public_key) == 1
+
+                if legacy_package or not stream_supported:
+                    package = encrypt_for_recipient(
+                        uploaded.getvalue(),
+                        public_key,
+                        filename=uploaded.name,
+                        padding=(
+                            PADDING_CHOICES[padding_label]
+                            if legacy_package
+                            else None
+                        ),
+                    )
+
+                    if not legacy_package and not stream_supported:
+                        st.warning(
+                            "Streaming encryption is currently supported only "
+                            "for ML-KEM-768. This package will use version 1 "
+                            "for compatibility with the selected algorithm suite."
+                        )
+
+                elif use_relay:
+                    package = encrypt_stream_for_verified_key(
+                        uploaded,
+                        uploaded.name,
+                        uploaded.size,
+                        verified,
+                        legacy=False,
+                    )
+
+                else:
+                    package = encrypt_stream_to_package(
+                        uploaded,
+                        uploaded.name,
+                        uploaded.size,
+                        public_key,
+                        legacy=False,
+                    )
+
             except KeyAuthError as exc:
                 st.error(f"🚫 Key NOT trusted: {exc}")
             except (ValueError, TypeError, relay.RelayError) as exc:
                 st.error(str(exc))
             else:
                 st.session_state["encrypted_package"] = {
-                    "package_name": package_download_name(uploaded.name),
+                    "package_name": package_download_name(uploaded.name, hide_name=hide_name),
                     "package_bytes": package,
                     "original_name": uploaded.name,
                     "original_size": len(uploaded.getvalue()),
                     "recipient_fingerprint": public_key_fingerprint(public_key, pretty=True),
+                    "suite": suite_of(public_key),
+                    "suite_name": suite_name(suite_of(public_key)),
                     "prepared_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "relay_code": None,
                 }
@@ -162,6 +264,8 @@ def show_sender() -> None:
     st.write(f"**Original file:** {encrypted['original_name']} ({human_size(encrypted['original_size'])})")
     st.write(f"**Encrypted at:** {encrypted['prepared_at']}")
     st.write(f"**Package size:** {human_size(len(encrypted['package_bytes']))}")
+    if encrypted.get("suite_name"):
+        st.write(f"**Algorithm suite:** {encrypted['suite']} ({encrypted['suite_name']})")
     if encrypted.get("recipient_fingerprint"):
         st.caption(f"Encrypted for public-key fingerprint: {encrypted['recipient_fingerprint']}")
 

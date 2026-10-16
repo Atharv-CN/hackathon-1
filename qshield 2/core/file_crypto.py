@@ -11,19 +11,52 @@ WHAT AES-256-GCM GIVES YOU
   - Integrity: if even one bit of the container is changed, decryption fails.
                Nothing is returned and no file is written.
 
-THE CONTAINER LAYOUT (everything is plain bytes)
-  +---------+-----------+--------------+-----------+-----------+-------------------+
-  | magic   | version   | metadata len | nonce     | metadata  | ciphertext + tag  |
-  | 4 bytes | 1 byte    | 4 bytes      | 12 bytes  | JSON text | file size + 16    |
-  +---------+-----------+--------------+-----------+-----------+-------------------+
-  The first three fields plus the metadata are the "authenticated metadata".
-  They are passed to AES-GCM as AAD (additional authenticated data), so they
-  cannot be changed without decryption failing.
+THE CONTAINER LAYOUT, VERSION 2 (everything is plain bytes)
+  +---------+-----------+-----------+------------------------------------------+
+  | magic   | version   | nonce     | ciphertext + 16-byte tag                 |
+  | 4 bytes | 1 byte    | 12 bytes  | (the encrypted payload, see below)       |
+  +---------+-----------+-----------+------------------------------------------+
+  The payload that gets encrypted is:
+  +--------------+-----------------------------+-----------+------------------+
+  | metadata len | metadata (JSON text)        | file data | optional padding |
+  | 4 bytes      | file name, size, timestamp  |           | zero bytes       |
+  +--------------+-----------------------------+-----------+------------------+
+  The magic and version are passed to AES-GCM as AAD (additional authenticated
+  data), so they cannot be changed without decryption failing.
+
+  The file NAME, the exact file SIZE and the CREATION TIME are INSIDE the
+  encrypted payload (version 1 kept them outside, in plain sight). Someone who
+  only has the container sees: the magic, the version, the nonce, and the total
+  length. Nothing else.
+
+OPTIONAL PADDING (hides the size)
+  Without padding the container length gives away the file size (plus the length
+  of the file name). encrypt_bytes(..., padding=...) adds zero bytes INSIDE the
+  encrypted payload so that sizes fall into groups:
+    padding=None      no padding (default). Exact size is visible.
+    padding="padme"   round up with the Padme rule (Nikitin et al., "Reducing
+                      Metadata Leakage from Encrypted Files and Communication with
+                      PURBs"): the extra length is at most about 12%, and it hides
+                      most of the size information for big files.
+    padding=65536     round up to a multiple of that many bytes. A big number such
+                      as 1048576 makes every file under 1 MB look the same size.
+  The padding is checked when decrypting: it must be all zeros, so it carries
+  nothing. Padding costs space, never security.
+
+LEGACY VERSION 1 (still readable, no longer written)
+  magic | version=1 | metadata length | nonce | metadata JSON | ciphertext + tag,
+  where the metadata (file name, size, time) was authenticated but NOT encrypted.
 
 IMPORTANT LIMITS - please read
-  - Metadata is AUTHENTICATED but NOT ENCRYPTED. The file name is visible to
-    anyone who has the container. Only the file CONTENTS are secret.
-  - The file size is not hidden.
+  - Padding hides the size only up to the group you chose. Without padding, the
+    container length still reveals the size. Even with padding, the rough size
+    (the group) is visible, and so is the fact that a transfer happened.
+  - The magic, version, nonce and total length are visible. Whoever stores or
+    forwards the container (a relay, a cloud drive, an email server) also sees
+    WHEN they received it and under what file name THEY gave it. Do not name the
+    download after the file. (The QShield app hides the name by default.)
+  - A short file name is hidden inside the payload, but a very long one makes the
+    payload longer. With padding that difference disappears.
   - Anyone who has the key can create a valid container. This module does not
     prove WHO sent a file.
   - It does not share keys. How the sender safely gives the key to the
@@ -92,15 +125,20 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 # ---- Format constants -------------------------------------------------------
 MAGIC = b"QSHD"          # marks "this is a QShield encrypted file"
-VERSION = 1              # lets future versions change the format safely
+VERSION = 2              # the version written today (name, size and time are encrypted)
+LEGACY_VERSION = 1       # still readable: name, size and time were visible
 KEY_SIZE = 32            # 32 bytes = 256 bits = AES-256
 NONCE_SIZE = 12          # 96 bits: the standard size for AES-GCM
 TAG_SIZE = 16            # AES-GCM adds a 16-byte authentication tag
 MAX_METADATA_SIZE = 64 * 1024
 MAX_PLAINTEXT_SIZE = 2**31 - 1   # the most the library accepts in one call
 
-# magic (4 bytes), version (1 byte), metadata length (4 bytes, big-endian)
+# Version 1: magic (4 bytes), version (1 byte), metadata length (4 bytes, big-endian)
 _PREFIX = struct.Struct(">4sBI")
+# Version 2: magic (4 bytes), version (1 byte). Nothing else is visible.
+_PREFIX_V2 = struct.Struct(">4sB")
+_META_LEN = struct.Struct(">I")   # inside the encrypted payload
+MAX_PAD_BLOCK = 2**30
 
 # ---- Streaming format constants (magic QSHS, version 1) ---------------------
 STREAM_MAGIC = b"QSHS"
@@ -135,7 +173,8 @@ class DecryptedFile:
 
     filename: str      # cleaned: never contains folders like ../
     data: bytes        # the original file contents
-    metadata: dict     # the authenticated metadata (all values checked)
+    metadata: dict     # file name, size and time (encrypted in version 2; all values checked)
+    padding_size: int = 0   # how many padding bytes were inside (0 for version 1)
 
 
 # ---- Keys -------------------------------------------------------------------
@@ -182,14 +221,44 @@ def _build_aad(prefix: bytes, metadata_bytes: bytes) -> bytes:
     return prefix + metadata_bytes
 
 
+# ---- Padding ----------------------------------------------------------------
+def padme_length(length: int) -> int:
+    """The Padme rule: round `length` up so only a few of its top bits vary.
+
+    Overhead is at most ~12% and shrinks for big files, while the number of
+    different possible sizes becomes very small. (Nikitin et al., PURBs, 2019.)
+    """
+    if length < 2:
+        return length
+    e = length.bit_length() - 1           # floor(log2(length))
+    s = e.bit_length()                    # floor(log2(e)) + 1
+    last_bits = e - s
+    mask = (1 << last_bits) - 1
+    return (length + mask) & ~mask
+
+
+def padded_length(length: int, padding=None) -> int:
+    """The payload length after padding. `padding` is None, "padme", or a block size in bytes."""
+    if padding is None or padding == "none":
+        return length
+    if padding == "padme":
+        return padme_length(length)
+    if isinstance(padding, int) and not isinstance(padding, bool) and 1 <= padding <= MAX_PAD_BLOCK:
+        return -(-length // padding) * padding   # round up to a multiple of `padding`
+    raise ValueError('padding must be None, "padme", or a block size in bytes (1 to 2**30).')
+
+
 # ---- Encrypt / decrypt bytes -------------------------------------------------
-def encrypt_bytes(plaintext: bytes, key: bytes, filename: str = "file") -> bytes:
-    """Encrypt bytes and return the container (see the layout at the top)."""
+def encrypt_bytes(plaintext: bytes, key: bytes, filename: str = "file", padding=None) -> bytes:
+    """Encrypt bytes and return the container (see the layout at the top).
+
+    The file name, exact size and creation time go INSIDE the encrypted payload.
+    `padding` (None, "padme", or a block size in bytes) optionally hides the size.
+    """
     if not isinstance(plaintext, (bytes, bytearray)):
         raise TypeError("plaintext must be bytes")
-    if len(plaintext) > MAX_PLAINTEXT_SIZE:
-        raise ValueError("File is too large for this module.")
     _check_key(key)
+    padded_length(0, padding)  # refuse a bad padding value early, with a clear error
 
     metadata = {
         "filename": _safe_filename(filename),
@@ -197,34 +266,106 @@ def encrypt_bytes(plaintext: bytes, key: bytes, filename: str = "file") -> bytes
         "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     metadata_bytes = json.dumps(metadata, sort_keys=True).encode("utf-8")
+    if len(metadata_bytes) > MAX_METADATA_SIZE:
+        raise ValueError("File name is too long.")
 
-    prefix = _PREFIX.pack(MAGIC, VERSION, len(metadata_bytes))
+    payload_length = _META_LEN.size + len(metadata_bytes) + len(plaintext)
+    pad_size = padded_length(payload_length, padding) - payload_length
+    if payload_length + pad_size > MAX_PLAINTEXT_SIZE:
+        raise ValueError("File is too large for this module.")
+    payload = (_META_LEN.pack(len(metadata_bytes)) + metadata_bytes + bytes(plaintext)
+               + bytes(pad_size))
+
+    prefix = _PREFIX_V2.pack(MAGIC, VERSION)
     nonce = os.urandom(NONCE_SIZE)  # a NEW random nonce for every encryption
-    ciphertext = AESGCM(bytes(key)).encrypt(
-        nonce, bytes(plaintext), _build_aad(prefix, metadata_bytes)
-    )
+    return prefix + nonce + AESGCM(bytes(key)).encrypt(nonce, payload, prefix)
+
+
+def _encrypt_bytes_v1(plaintext: bytes, key: bytes, filename: str = "file") -> bytes:
+    """LEGACY: the old version-1 container (name, size and time visible).
+
+    Kept only so the tests can prove old containers still open. Do not use it.
+    """
+    _check_key(key)
+    metadata = {
+        "filename": _safe_filename(filename),
+        "original_size": len(plaintext),
+        "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    metadata_bytes = json.dumps(metadata, sort_keys=True).encode("utf-8")
+    prefix = _PREFIX.pack(MAGIC, LEGACY_VERSION, len(metadata_bytes))
+    nonce = os.urandom(NONCE_SIZE)
+    ciphertext = AESGCM(bytes(key)).encrypt(nonce, bytes(plaintext), _build_aad(prefix, metadata_bytes))
     return prefix + nonce + metadata_bytes + ciphertext
 
 
 def decrypt_bytes(container: bytes, key: bytes) -> DecryptedFile:
-    """Check and decrypt a container. Raises DecryptionError if anything is
-    wrong. Data is only returned after the authentication check has passed."""
+    """Check and decrypt a container (version 2, or legacy version 1). Raises
+    DecryptionError if anything is wrong. Data is only returned after the
+    authentication check has passed."""
     _check_key(key)
     container = bytes(container)
 
-    if container[:4] == STREAM_MAGIC:  # new streaming format: dispatch by magic
+    if container[:4] == STREAM_MAGIC:  # streaming format: dispatch by magic
         sink = io.BytesIO()
         result = decrypt_stream(io.BytesIO(container), sink, key)
         return DecryptedFile(filename=result.filename, data=sink.getvalue(), metadata=result.metadata)
 
-    if len(container) < _PREFIX.size + NONCE_SIZE + TAG_SIZE:
+    if len(container) < _PREFIX_V2.size + NONCE_SIZE + TAG_SIZE:
         raise DecryptionError("This is too short to be a QShield encrypted file.")
-
-    magic, version, metadata_len = _PREFIX.unpack_from(container, 0)
+    magic, version = _PREFIX_V2.unpack_from(container, 0)
     if magic != MAGIC:
         raise DecryptionError("This is not a QShield encrypted file.")
-    if version != VERSION:
-        raise DecryptionError(f"Unsupported file version: {version}.")
+    if version == VERSION:
+        return _decrypt_v2(container, key)
+    if version == LEGACY_VERSION:
+        return _decrypt_v1(container, key)
+    raise DecryptionError(f"Unsupported file version: {version}.")
+
+
+def _decrypt_v2(container: bytes, key: bytes) -> DecryptedFile:
+    nonce_start = _PREFIX_V2.size
+    ciphertext_start = nonce_start + NONCE_SIZE
+    try:
+        payload = AESGCM(bytes(key)).decrypt(
+            container[nonce_start:ciphertext_start], container[ciphertext_start:],
+            container[:_PREFIX_V2.size],
+        )
+    except InvalidTag:
+        raise DecryptionError(
+            "Decryption failed: wrong key, or the file was changed or damaged."
+        ) from None
+
+    # Only now, after authentication passed, is the payload taken apart.
+    try:
+        if len(payload) < _META_LEN.size:
+            raise ValueError
+        (metadata_len,) = _META_LEN.unpack_from(payload, 0)
+        data_start = _META_LEN.size + metadata_len
+        if metadata_len > MAX_METADATA_SIZE or data_start > len(payload):
+            raise ValueError
+        metadata = json.loads(payload[_META_LEN.size:data_start].decode("utf-8"))
+        filename = _safe_filename(metadata["filename"])
+        size = metadata["original_size"]
+        if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+            raise ValueError
+        data_end = data_start + size
+        if data_end > len(payload):
+            raise ValueError
+        padding = payload[data_end:]
+        if padding.count(0) != len(padding):   # padding must be all zeros
+            raise ValueError
+    except (ValueError, KeyError, TypeError):
+        raise DecryptionError("The file's metadata is not valid.") from None
+
+    return DecryptedFile(filename=filename, data=payload[data_start:data_end],
+                         metadata=metadata, padding_size=len(padding))
+
+
+def _decrypt_v1(container: bytes, key: bytes) -> DecryptedFile:
+    if len(container) < _PREFIX.size + NONCE_SIZE + TAG_SIZE:
+        raise DecryptionError("This is too short to be a QShield encrypted file.")
+    _, _, metadata_len = _PREFIX.unpack_from(container, 0)
     if metadata_len > MAX_METADATA_SIZE:
         raise DecryptionError("The file header is invalid.")
 
@@ -245,7 +386,6 @@ def decrypt_bytes(container: bytes, key: bytes) -> DecryptedFile:
             "Decryption failed: wrong key, or the file was changed or damaged."
         ) from None
 
-    # Only now, after authentication passed, is the metadata read as JSON.
     try:
         metadata = json.loads(metadata_bytes.decode("utf-8"))
         filename = _safe_filename(metadata["filename"])
@@ -564,16 +704,55 @@ def sync_temp(f) -> None:
 
 
 # ---- Encrypt / decrypt files on disk ----------------------------------------
-def encrypt_file(input_path, output_path, key: bytes, overwrite: bool = False, *,
-                 segment_size: int = DEFAULT_SEGMENT_SIZE) -> Path:
-    """Encrypt a file with the STREAMING format. Bounded memory, any practical size.
+# ---- Encrypt / decrypt files on disk ----------------------------------------
+def encrypt_file(input_path, output_path, key: bytes, overwrite: bool = False,
+                 padding=None, *, segment_size: int = DEFAULT_SEGMENT_SIZE) -> Path:
+    """Encrypt a file and write the container to output_path.
 
-    The output is written to a private temporary file and moved into place only when
-    complete, so a failure never leaves a partial output. An existing output is never
-    replaced unless overwrite=True."""
+    padding=None (default): STREAMING format (QSHS). Bounded memory, any practical size.
+        NOTE: in this format the file name, size and creation time are authenticated but
+        visible (they are not encrypted).
+    padding="padme" or a block size: the whole-file container (QSHD version 2). It hides the
+        name, exact size and time and pads the size, but holds the whole file in memory
+        and is limited to about 2 GB.
+
+    Either way the output goes to a private temporary file and is moved into place only
+    when complete, so a failure never leaves a partial output. An existing output is
+    never replaced unless overwrite=True."""
     input_path, output_path = Path(input_path), Path(output_path)
     if not overwrite and (output_path.exists() or output_path.is_symlink()):
         raise FileExistsError(str(output_path))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if padding is not None and padding != "none":
+        with open(input_path, "rb") as src:
+            if os.fstat(src.fileno()).st_size > MAX_PLAINTEXT_SIZE:
+                raise ValueError("File is too large for padded whole-file encryption.")
+            container = encrypt_bytes(src.read(), key, filename=input_path.name, padding=padding)
+        out, temp_path = create_private_temp(output_path.parent)
+        try:
+            with out:
+                out.write(container)
+                sync_temp(out)
+            publish(temp_path, output_path, overwrite)
+        except BaseException:
+            _discard(temp_path)
+            raise
+        return output_path
+
+    with open(input_path, "rb") as src:
+        st = os.fstat(src.fileno())
+        size = st.st_size if stat.S_ISREG(st.st_mode) else None   # pipes/FIFOs: length unknown in advance
+        out, temp_path = create_private_temp(output_path.parent)
+        try:
+            with out:
+                encrypt_stream(src, out, key, input_path.name, size=size, segment_size=segment_size)
+                sync_temp(out)
+            publish(temp_path, output_path, overwrite)
+        except BaseException:
+            _discard(temp_path)
+            raise
+    return output_path
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(input_path, "rb") as src:
         st = os.fstat(src.fileno())

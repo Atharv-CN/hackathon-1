@@ -7,7 +7,7 @@ import streamlit as st
 import relay
 from core.file_crypto import DecryptionError
 from core.file_utils import clean_hash_text, human_size, sha256_of_bytes
-from core.pq_transfer import TransferError, WrongRecipientError
+from core.pq_transfer import SUITES, TransferError, WrongRecipientError
 from core.identity import KeyAuthError
 from core.transfer_flow import (
     create_identity_bundle,
@@ -28,8 +28,24 @@ DECRYPT_FAIL_MESSAGE = (
 def _show_generate_keys() -> None:
     st.subheader("1. Generate your keys")
     st.write(
-        "Make an ML-KEM-768 key pair. Share only the **public** key with the "
-        "sender. Keep the private key on this side, protected by a password."
+        "Make a key pair. Share only the **public** key with the sender. Keep "
+        "the private key on this side, protected by a password."
+    )
+
+    suite = st.selectbox(
+        "Algorithm suite",
+        options=list(SUITES),
+        format_func=lambda n: {
+            1: "Suite 1: ML-KEM-768 only",
+            2: "Suite 2: X25519 + ML-KEM-768 (hybrid: an attacker must break both)",
+            3: "Suite 3: ML-KEM-1024 (higher security level, larger keys)",
+        }[n],
+        key="receiver_suite",
+        help=(
+            "Suite 2 still protects against ordinary computers if a flaw is found "
+            "in ML-KEM. Suite 3 adds safety margin but is the same algorithm family "
+            "as suite 1. The sender needs no setting: the public key says which suite to use."
+        ),
     )
 
     password = st.text_input(
@@ -39,12 +55,12 @@ def _show_generate_keys() -> None:
         help="Required. The private key is saved only in password-protected form.",
     )
 
-    if st.button("Generate ML-KEM-768 key pair", type="primary"):
+    if st.button(f"Generate {SUITES[suite].name} key pair", type="primary"):
         if not password:
             st.error("Please enter a password to protect the private key.")
         else:
             try:
-                bundle = create_recipient_key_bundle(password)
+                bundle = create_recipient_key_bundle(password, suite)
             except Exception as exc:
                 st.error(str(exc))
             else:
@@ -53,6 +69,8 @@ def _show_generate_keys() -> None:
                     "fingerprint": bundle.fingerprint,
                     "fingerprint_pretty": bundle.fingerprint_pretty,
                     "protected_pem": bundle.protected_pem,
+                    "suite": bundle.suite,
+                    "suite_name": bundle.suite_name,
                 }
                 st.success(
                     "Key pair created. Copy the public key for the sender, and "
@@ -64,6 +82,7 @@ def _show_generate_keys() -> None:
         st.info("Generate a key pair to get a public key you can share.")
         return
 
+    st.caption(f"Suite {keys.get('suite', 1)}: {keys.get('suite_name', 'ML-KEM-768')}")
     st.write("**Your public key** (safe to copy and send):")
     st.code(keys["public_text"], language=None)
     st.write("**Public-key fingerprint:**")

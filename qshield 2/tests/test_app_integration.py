@@ -100,7 +100,9 @@ def test_package_download_name(name, expected):
 def test_security_status_marks_connected_crypto_as_working():
     rows = {row["Feature"]: row for row in get_feature_list()}
     assert rows["File encryption (AES-256-GCM)"]["Status"] == WORKING
-    assert rows["Key establishment (ML-KEM-768 + HKDF-SHA256)"]["Status"] == WORKING
+    assert rows["Key establishment, suite 1 (ML-KEM-768 + HKDF-SHA256)"]["Status"] == WORKING
+    assert rows["Hybrid key establishment, suite 2 (X25519 + ML-KEM-768 + HKDF-SHA256)"]["Status"] == WORKING
+    assert rows["Higher security level, suite 3 (ML-KEM-1024 + HKDF-SHA256)"]["Status"] == WORKING
     assert rows["Encrypted file integrity verification"]["Status"] == WORKING
     assert "not connected" not in rows["File encryption (AES-256-GCM)"]["Details"].lower()
     assert rows["Sender identity verification"]["Status"] != WORKING
