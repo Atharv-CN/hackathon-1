@@ -67,8 +67,10 @@ IMPORTANT LIMITS - please read
     private key later can open packages saved earlier. That is expected for
     stored files. For live channels use core/session.py, which adds an
     ephemeral-KEM handshake with forward secrecy.
-  - The file name and file size are visible (the name is protected from being
-    changed, but it is not secret).
+  - The file name, exact size and creation time are inside the encrypted part
+    (container version 2). What stays visible: the suite, the recipient key
+    fingerprint and the total package length. Optional padding hides the size
+    (padding="padme" or a block size, see core/file_crypto.py).
   - This code has not had an independent security audit.
   - The Streamlit Sender and Receiver tabs call this module. Encryption still
     does not prove who the sender is.
@@ -466,11 +468,13 @@ def _derive_aes_key(shared_secret: bytes, header: bytes, suite: int = SUITE_MLKE
 # ---- Encrypt / decrypt ----------------------------------------------------------
 @_no_fallback
 def encrypt_for_recipient(plaintext: bytes, recipient_public_key,
-                          filename: str = "file") -> bytes:
+                          filename: str = "file", padding=None) -> bytes:
     """Encrypt bytes for a recipient and return the transfer package (bytes).
 
     Only the recipient's PUBLIC key is needed (and accepted). The suite is the
-    one the key was made for.
+    one the key was made for. The file name, size and time are inside the
+    encrypted part. `padding` (None, "padme", or a block size in bytes) hides
+    the size; see core/file_crypto.py.
     """
     if _is_private_key(recipient_public_key):
         raise TypeError(
@@ -488,7 +492,7 @@ def encrypt_for_recipient(plaintext: bytes, recipient_public_key,
     ) + kem_ciphertext
 
     aes_key = _derive_aes_key(kem_secret, header, suite)
-    return header + file_crypto.encrypt_bytes(plaintext, aes_key, filename=filename)
+    return header + file_crypto.encrypt_bytes(plaintext, aes_key, filename=filename, padding=padding)
 
 
 def package_suite(package: bytes) -> int:
@@ -563,11 +567,11 @@ def decrypt_package(package: bytes, recipient_private_key) -> DecryptedFile:
 
 # ---- Files on disk ------------------------------------------------------------
 def encrypt_file_for_recipient(input_path, output_path, recipient_public_key,
-                               overwrite: bool = False) -> Path:
+                               overwrite: bool = False, padding=None) -> Path:
     """Read a file, encrypt it for the recipient, and write the package."""
     input_path, output_path = Path(input_path), Path(output_path)
     package = encrypt_for_recipient(input_path.read_bytes(), recipient_public_key,
-                                    filename=input_path.name)
+                                    filename=input_path.name, padding=padding)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "wb" if overwrite else "xb") as f:  # "xb": never overwrite
         f.write(package)

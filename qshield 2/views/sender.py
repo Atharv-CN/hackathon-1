@@ -18,8 +18,9 @@ def show_sender() -> None:
         "for (ML-KEM-768, X25519 + ML-KEM-768, or ML-KEM-1024) with AES-256-GCM."
     )
     st.caption(
-        "Encryption hides the file contents from anyone who does not have the "
-        "receiver's private key. It does **not** prove who you are."
+        "Encryption hides the file contents, the file name, the exact size and the "
+        "time from anyone who does not have the receiver's private key. The package "
+        "length is still visible unless you add padding. It does **not** prove who you are."
     )
 
     uploaded = st.file_uploader("Choose a file to encrypt", key="sender_upload")
@@ -28,6 +29,27 @@ def show_sender() -> None:
         height=120,
         placeholder="Paste the public key from the Receiver tab",
         key="sender_public_key",
+    )
+
+    PADDING_CHOICES = {
+        "No padding (exact size is visible)": None,
+        "Hide the size roughly (Padmé, up to ~12% bigger)": "padme",
+        "Round up to 64 KB blocks": 64 * 1024,
+        "Round up to 1 MB (smaller files all look alike)": 1024 * 1024,
+    }
+    padding_label = st.selectbox(
+        "Hide the file size (optional padding)",
+        list(PADDING_CHOICES),
+        key="sender_padding",
+        help="Padding is added inside the encryption. It makes the package larger "
+             "but hides how big the original file was.",
+    )
+    hide_name = st.checkbox(
+        "Hide the file name in the download name (recommended)",
+        value=True,
+        key="sender_hide_name",
+        help="The real file name is always stored inside the encryption. This only "
+             "stops it showing in the downloaded file's name.",
     )
 
     receiver_code = ""
@@ -61,13 +83,14 @@ def show_sender() -> None:
                     key_text = key_bytes.decode("utf-8")
                 public_key = public_key_from_text(key_text)
                 package = encrypt_uploaded_file(
-                    uploaded.getvalue(), uploaded.name, key_text
+                    uploaded.getvalue(), uploaded.name, key_text,
+                    padding=PADDING_CHOICES[padding_label],
                 )
             except (ValueError, TypeError, relay.RelayError) as exc:
                 st.error(str(exc))
             else:
                 st.session_state["encrypted_package"] = {
-                    "package_name": package_download_name(uploaded.name),
+                    "package_name": package_download_name(uploaded.name, hide_name=hide_name),
                     "package_bytes": package,
                     "original_name": uploaded.name,
                     "original_size": len(uploaded.getvalue()),

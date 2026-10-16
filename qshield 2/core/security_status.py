@@ -25,8 +25,9 @@ def get_feature_list() -> list[dict]:
             "Status": WORKING,
             "Details": (
                 "Implemented in core/file_crypto.py and used by the Sender Encrypt File "
-                "and Receiver Decrypt buttons. File contents are secret; the file name "
-                "is visible."
+                "and Receiver Decrypt buttons. File contents, file name, exact size and "
+                "time are all inside the encryption. The package length is still "
+                "visible unless optional padding is used."
             ),
         },
         {

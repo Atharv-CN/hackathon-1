@@ -91,13 +91,14 @@ except DecryptionError:
 
 What it does:
 - Makes a fresh random nonce for every encryption.
-- Checks the file contents **and** the header (the file name, size and format version) when decrypting. If even one bit was changed, decryption fails and returns nothing.
+- Checks the file contents, the file name, size and time, **and** the format version when decrypting. If even one bit was changed, decryption fails and returns nothing.
 - Never has a built-in key. The key is always passed in, and `generate_key()` makes a new random one.
 - Has `encrypt_file()` and `decrypt_file()` for files on disk. They never overwrite an existing file unless you ask.
 
 What it does **not** do (read this before you trust it):
-- The **file name is visible**. It is checked for changes, but it is not secret. Only the file contents are secret.
-- The file size is not hidden.
+- The **file name, exact size and creation time are inside the encryption** (container version 2; the old version 1 kept them visible and still opens). Someone holding the container sees only a marker, the version, a random nonce and the total length.
+- The total length still reveals the file size unless you turn on **padding**: `encrypt_bytes(data, key, padding="padme")` (at most ~12% bigger, hides most of the size information) or `padding=65536` (round up to a multiple of that many bytes; `1048576` makes every file under 1 MB look alike). Padding is zeros inside the encryption and is checked on opening.
+- Whoever stores or forwards the container sees **when** they got it and **what name they gave it**. The app's download name is random by default, so the real name does not leak there or into the relay.
 - Anyone who has the key can make a valid file, so it does not prove who the sender is.
 - It does not share keys. How the sender safely gives the key to the receiver is the next problem to solve.
 - Use a **new key for each transfer**.
@@ -160,7 +161,7 @@ Read these limits before you trust it:
 - **No proof of who sent it.** Anyone with the public key can make a package. Digital signatures would be needed for that. They are not built.
 - **Check the public key.** Compare fingerprints with the receiver by phone or in person. Otherwise someone could swap in their own public key.
 - **No forward secrecy for stored packages.** If the private key is stolen later, old packages can be opened. That is expected for files kept on disk. For live channels, see "Live sessions with forward secrecy" below.
-- The file name and size are visible.
+- Visible outside the encryption: the suite, the recipient key fingerprint, and the total package length (rounded if you use padding). The file name, exact size and time are hidden. The Supabase relay also sees when a package was uploaded.
 - There has been no independent security audit.
 - The Streamlit app now uses this module. The tabs still run in one browser session, so treat that as a demo of the buttons, not as two separate computers. The sender tab never displays the private key.
 
@@ -227,10 +228,12 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-Add `-v` to see every test name. You should see `275 passed`.
+Add `-v` to see every test name. You should see `338 passed`.
 
 What the tests prove:
 - **Encryption works:** files of many sizes are encrypted and recovered, with and without ML-KEM.
+- **Metadata is private:** the file name, exact size and creation time cannot be found anywhere in a container or package, with or without padding. Old version-1 containers still open.
+- **Padding works:** padded packages fall into the expected size groups, padding must be all zeros, and forged padding or metadata is rejected.
 - **Corruption is rejected:** changing **any single bit** anywhere in a package is rejected. So are truncated packages, extra bytes, mixed-up parts, and unknown versions.
 - **Wrong keys are rejected:** a package for a different recipient key cannot be opened, even if the fingerprint label is forged.
 - **The private key stays private:** it is not in the package and not in the shared public key, and it is saved only password-protected.
@@ -268,6 +271,7 @@ qshield/
     ├── test_pq_transfer.py    Tests for ML-KEM-768 transfer packages (suite 1).
     ├── test_suites.py         Tests for suites 2 (hybrid) and 3, and suite mixing.
     ├── test_session.py        Tests for the forward-secret session protocol.
+    ├── test_metadata_privacy.py Tests for hidden file name/size/time and padding.
     ├── test_mlkem_interop.py  Checks the library's ML-KEM against a second implementation.
     ├── test_app_integration.py Website encrypt/decrypt flow (no browser).
     └── data/golden_package_v1*.json  Saved version-1 packages (public TEST keys only).
