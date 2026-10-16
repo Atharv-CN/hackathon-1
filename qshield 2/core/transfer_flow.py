@@ -5,6 +5,7 @@ AES-256-GCM). The receiver picks one of three suites when making keys:
 1 = ML-KEM-768, 2 = X25519 + ML-KEM-768 (hybrid), 3 = ML-KEM-1024.
 """
 
+import secrets
 from dataclasses import dataclass
 
 from core.file_crypto import DecryptedFile
@@ -53,7 +54,15 @@ def create_recipient_key_bundle(password: str, suite: int = 1) -> RecipientKeyBu
     )
 
 
-def package_download_name(original_filename: str) -> str:
+def package_download_name(original_filename: str, hide_name: bool = False) -> str:
+    """The name for the downloaded package.
+
+    hide_name=True gives a neutral random name, so the original file name is not
+    visible outside the encryption (in the file system, an email, or the relay).
+    The real name is stored inside the package and comes back when it is opened.
+    """
+    if hide_name:
+        return f"qshield-{secrets.token_hex(4)}.qshield"
     name = (original_filename or "file").replace("\\", "/").split("/")[-1].strip()
     if not name or name in (".", ".."):
         name = "file"
@@ -62,10 +71,14 @@ def package_download_name(original_filename: str) -> str:
     return f"{name}.qshield"
 
 
-def encrypt_uploaded_file(file_bytes: bytes, filename: str, public_key_text: str) -> bytes:
-    """Encrypt a sender upload for the pasted recipient public key."""
+def encrypt_uploaded_file(file_bytes: bytes, filename: str, public_key_text: str,
+                          padding=None) -> bytes:
+    """Encrypt a sender upload for the pasted recipient public key.
+
+    padding: None (exact size visible), "padme", or a block size in bytes.
+    """
     public_key = public_key_from_text(public_key_text)
-    return encrypt_for_recipient(file_bytes, public_key, filename=filename)
+    return encrypt_for_recipient(file_bytes, public_key, filename=filename, padding=padding)
 
 
 def decrypt_uploaded_package(package_bytes: bytes, protected_pem: bytes, password: str) -> DecryptedFile:
