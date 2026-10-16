@@ -61,6 +61,18 @@ def get_feature_list() -> list[dict]:
             ),
         },
         {
+            "Feature": "Forward-secret live sessions (ephemeral-KEM handshake)",
+            "Status": BUILT_NOT_CONNECTED,
+            "Details": (
+                "Implemented and tested in core/session.py (all three suites): a "
+                "separate session protocol, not used for .qshield files, and not "
+                "connected to the Streamlit app. If the server's long-term key leaks "
+                "after a session ended, the recorded session stays closed. The client "
+                "is not authenticated, and .qshield packages themselves still have no "
+                "forward secrecy."
+            ),
+        },
+        {
             "Feature": "Encrypted file integrity verification",
             "Status": WORKING,
             "Details": (

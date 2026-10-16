@@ -159,10 +159,46 @@ The package (format version 1) is a small header followed by the encrypted file.
 Read these limits before you trust it:
 - **No proof of who sent it.** Anyone with the public key can make a package. Digital signatures would be needed for that. They are not built.
 - **Check the public key.** Compare fingerprints with the receiver by phone or in person. Otherwise someone could swap in their own public key.
-- **No forward secrecy.** If the private key is stolen later, old packages can be opened.
+- **No forward secrecy for stored packages.** If the private key is stolen later, old packages can be opened. That is expected for files kept on disk. For live channels, see "Live sessions with forward secrecy" below.
 - The file name and size are visible.
 - There has been no independent security audit.
 - The Streamlit app now uses this module. The tabs still run in one browser session, so treat that as a demo of the buttons, not as two separate computers. The sender tab never displays the private key.
+
+## Live sessions with forward secrecy (separate protocol)
+
+`.qshield` packages are encrypted to a long-term key, so a leaked private key opens every saved package. `core/session.py` is a **separate protocol for live channels** that fixes this with an ephemeral-KEM handshake. Think of the padlock again: for every session the client makes a brand-new one-time padlock, uses it once, then **throws the key away**. Whoever steals the server's long-term key later cannot rebuild the keys of a finished session.
+
+1. The client makes a one-time key pair and sends its public half, plus a locked box for the server's long-term key (`ClientHello`).
+2. The server opens that box, locks a second box for the one-time key, and answers with a confirmation tag (`ServerHello`).
+3. Both secrets go into HKDF-SHA256 together with a hash of the whole handshake. The client then deletes the one-time private key.
+4. Messages use AES-256-GCM, one key per direction, with a counter so replayed, re-ordered or dropped messages are refused.
+
+It works with all three suites (the server's key decides which). It uses only ML-KEM / X25519, HKDF, HMAC and AES-256-GCM from the `cryptography` library.
+
+```python
+from core.session import ClientHandshake, ServerHandshake
+
+# SERVER: its long-term key from generate_recipient_keypair(...)
+server = ServerHandshake(server_private_key)
+
+# CLIENT: knows the server's PUBLIC key (fingerprint checked by phone)
+client = ClientHandshake(server_public_key)
+client_hello = client.start()                      # send to the server
+server_hello, server_session = server.respond(client_hello)   # send back
+client_session = client.finish(server_hello)       # raises HandshakeError if anything is off
+
+record = client_session.seal(b"hello")             # send to the server
+server_session.open(record)                        # b"hello"
+```
+
+`client_connect(sock, public_key)` and `server_accept(sock, private_key)` run the same thing over a TCP socket.
+
+Limits (please read):
+- **Only protects PAST sessions.** If the server's key is stolen before or during a session, the thief can impersonate the server and read that live session.
+- **The client is not authenticated.** Anyone can open a session. There are no client keys or signatures.
+- **Check the server's public key** by fingerprint, or the client may talk to an attacker.
+- Forward secrecy depends on the client really forgetting the one-time key. Python cannot guarantee memory is wiped, and a machine that is already hacked during the session is lost.
+- One handshake is one session, with no re-keying. It is **not connected to the Streamlit app**, and there has been no independent security audit.
 
 ## Two-device demo (optional Supabase relay)
 
@@ -191,7 +227,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-Add `-v` to see every test name. You should see `181 passed`.
+Add `-v` to see every test name. You should see `275 passed`.
 
 What the tests prove:
 - **Encryption works:** files of many sizes are encrypted and recovered, with and without ML-KEM.
@@ -200,6 +236,8 @@ What the tests prove:
 - **The private key stays private:** it is not in the package and not in the shared public key, and it is saved only password-protected.
 - **ML-KEM is the real thing:** a separate implementation (`kyber-py`, used only in the tests) agrees with the library for ML-KEM-768 and ML-KEM-1024, and can open QShield packages.
 - **The hybrid really is a hybrid:** the AES key is rebuilt by hand from both secrets, and no key can be derived from only one of them. Both private halves are needed.
+- **Sessions have forward secrecy:** a test records a whole session, then gives the attacker the server's long-term private key. Every attempt to rebuild the keys fails, and a control in the same test shows the same steps succeed when the deleted one-time key is supplied.
+- **Sessions refuse tampering:** every changed handshake byte, an impostor server, a wrong server key, and any changed, replayed, re-ordered or dropped message is rejected.
 - **No downgrades:** changing the suite label, or opening a package with a key of another suite, is refused.
 - **Format version 1 is frozen:** saved version-1 packages for all three suites in `tests/data/` must keep opening. Its key is a public test key, so never use it for real data.
 - **No silent fallback:** if ML-KEM is unavailable, QShield stops.
@@ -217,6 +255,7 @@ qshield/
 │   ├── file_utils.py       SHA-256 fingerprint, file size text.
 │   ├── file_crypto.py      AES-256-GCM encrypt / decrypt.
 │   ├── pq_transfer.py      ML-KEM / hybrid / ML-KEM-1024 + HKDF + AES-256-GCM transfer packages.
+│   ├── session.py          Forward-secret live sessions (ephemeral-KEM handshake).
 │   ├── transfer_flow.py    Glue used by the Sender and Receiver tabs.
 │   ├── state.py            Shared memory between the tabs.
 │   └── security_status.py  The honest list of working / not-built features.
@@ -228,6 +267,7 @@ qshield/
     ├── test_file_crypto.py    Tests for the AES-256-GCM module.
     ├── test_pq_transfer.py    Tests for ML-KEM-768 transfer packages (suite 1).
     ├── test_suites.py         Tests for suites 2 (hybrid) and 3, and suite mixing.
+    ├── test_session.py        Tests for the forward-secret session protocol.
     ├── test_mlkem_interop.py  Checks the library's ML-KEM against a second implementation.
     ├── test_app_integration.py Website encrypt/decrypt flow (no browser).
     └── data/golden_package_v1*.json  Saved version-1 packages (public TEST keys only).

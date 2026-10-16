@@ -64,7 +64,9 @@ IMPORTANT LIMITS - please read
     fingerprints over a second channel (phone call, in person) before trusting
     a public key. Use public_key_fingerprint().
   - NO FORWARD SECRECY for the long-term key. Whoever steals the receiver's
-    private key later can open packages saved earlier.
+    private key later can open packages saved earlier. That is expected for
+    stored files. For live channels use core/session.py, which adds an
+    ephemeral-KEM handshake with forward secrecy.
   - The file name and file size are visible (the name is protected from being
     changed, but it is not secret).
   - This code has not had an independent security audit.
