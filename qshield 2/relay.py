@@ -11,6 +11,8 @@ Setup: see README "Two-device demo". Needs SUPABASE_URL and
 SUPABASE_SERVICE_KEY (environment variables, or Streamlit secrets).
 """
 
+from __future__ import annotations  # lets "str | None" work on Python 3.9 too
+
 import base64
 import os
 import secrets

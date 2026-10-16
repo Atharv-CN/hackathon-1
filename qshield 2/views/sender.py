@@ -6,7 +6,7 @@ import streamlit as st
 
 import relay
 from core.file_utils import human_size, sha256_of_bytes
-from core.pq_transfer import public_key_fingerprint, public_key_from_text
+from core.pq_transfer import public_key_fingerprint, public_key_from_text, suite_name, suite_of
 from core.transfer_flow import encrypt_uploaded_file, package_download_name
 
 
@@ -14,11 +14,13 @@ def show_sender() -> None:
     st.header("📤 Sender")
     st.write(
         "Upload a **test file** (not real secrets) and paste the receiver's "
-        "public key. QShield encrypts the file with ML-KEM-768 + AES-256-GCM."
+        "public key. QShield uses the algorithm suite that the public key was made "
+        "for (ML-KEM-768, X25519 + ML-KEM-768, or ML-KEM-1024) with AES-256-GCM."
     )
     st.caption(
-        "Encryption hides the file contents from anyone who does not have the "
-        "receiver's private key. It does **not** prove who you are."
+        "Encryption hides the file contents, the file name, the exact size and the "
+        "time from anyone who does not have the receiver's private key. The package "
+        "length is still visible unless you add padding. It does **not** prove who you are."
     )
 
     uploaded = st.file_uploader("Choose a file to encrypt", key="sender_upload")
@@ -27,6 +29,27 @@ def show_sender() -> None:
         height=120,
         placeholder="Paste the public key from the Receiver tab",
         key="sender_public_key",
+    )
+
+    PADDING_CHOICES = {
+        "No padding (exact size is visible)": None,
+        "Hide the size roughly (Padmé, up to ~12% bigger)": "padme",
+        "Round up to 64 KB blocks": 64 * 1024,
+        "Round up to 1 MB (smaller files all look alike)": 1024 * 1024,
+    }
+    padding_label = st.selectbox(
+        "Hide the file size (optional padding)",
+        list(PADDING_CHOICES),
+        key="sender_padding",
+        help="Padding is added inside the encryption. It makes the package larger "
+             "but hides how big the original file was.",
+    )
+    hide_name = st.checkbox(
+        "Hide the file name in the download name (recommended)",
+        value=True,
+        key="sender_hide_name",
+        help="The real file name is always stored inside the encryption. This only "
+             "stops it showing in the downloaded file's name.",
     )
 
     receiver_code = ""
@@ -60,17 +83,20 @@ def show_sender() -> None:
                     key_text = key_bytes.decode("utf-8")
                 public_key = public_key_from_text(key_text)
                 package = encrypt_uploaded_file(
-                    uploaded.getvalue(), uploaded.name, key_text
+                    uploaded.getvalue(), uploaded.name, key_text,
+                    padding=PADDING_CHOICES[padding_label],
                 )
             except (ValueError, TypeError, relay.RelayError) as exc:
                 st.error(str(exc))
             else:
                 st.session_state["encrypted_package"] = {
-                    "package_name": package_download_name(uploaded.name),
+                    "package_name": package_download_name(uploaded.name, hide_name=hide_name),
                     "package_bytes": package,
                     "original_name": uploaded.name,
                     "original_size": len(uploaded.getvalue()),
                     "recipient_fingerprint": public_key_fingerprint(public_key, pretty=True),
+                    "suite": suite_of(public_key),
+                    "suite_name": suite_name(suite_of(public_key)),
                     "prepared_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "relay_code": None,
                 }
@@ -85,6 +111,8 @@ def show_sender() -> None:
     st.write(f"**Original file:** {encrypted['original_name']} ({human_size(encrypted['original_size'])})")
     st.write(f"**Encrypted at:** {encrypted['prepared_at']}")
     st.write(f"**Package size:** {human_size(len(encrypted['package_bytes']))}")
+    if encrypted.get("suite_name"):
+        st.write(f"**Algorithm suite:** {encrypted['suite']} ({encrypted['suite_name']})")
     if encrypted.get("recipient_fingerprint"):
         st.caption(f"Encrypted for public-key fingerprint: {encrypted['recipient_fingerprint']}")
 
