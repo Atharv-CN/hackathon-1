@@ -52,17 +52,31 @@ def get_feature_list() -> list[dict]:
             "Feature": "Claim that the whole system is 'quantum-resistant'",
             "Status": NOT_CLAIMED,
             "Details": (
-                "Only the key-establishment step uses a post-quantum algorithm "
-                "(ML-KEM-768). There are no digital signatures and no audit."
+                "The app's key-establishment step uses a post-quantum algorithm "
+                "(ML-KEM-768). Post-quantum signatures are built (see below) but not "
+                "connected to the app yet. There is no forward secrecy and no "
+                "independent audit, so this is not claimed."
+            ),
+        },
+        {
+            "Feature": "Digital signatures (Ed25519 + ML-DSA-65, hybrid)",
+            "Status": BUILT_NOT_CONNECTED,
+            "Details": (
+                "Implemented in core/signatures.py. Both signatures must verify, so a "
+                "forger would have to break Ed25519 and ML-DSA-65 (NIST FIPS 204). "
+                "There is no fallback to a single algorithm. Not connected to the app "
+                "yet, no key revocation, no independent audit."
             ),
         },
         {
             "Feature": "Sender identity verification",
-            "Status": NOT_BUILT,
+            "Status": BUILT_NOT_CONNECTED,
             "Details": (
-                "Encryption does not prove who sent a file. Anyone who has the "
-                "receiver's public key can make a valid package. Digital signatures "
-                "are not built."
+                "Built and tested in core/signed_transfer.py but NOT used by the "
+                "Sender and Receiver tabs yet. Packages made by this app are still "
+                "unsigned: anyone who has the receiver's public key can make one. "
+                "Signed (version 2) packages prove which trusted sender made them. "
+                "Trust is only as good as the fingerprint check between people."
             ),
         },
         {

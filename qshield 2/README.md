@@ -15,7 +15,7 @@ QShield is at **stage 4**. Here is the honest list:
 | ML-KEM-768 key establishment connected to the app | ✅ Working |
 | Encrypted file integrity verification (AES-GCM) | ✅ Working |
 | Claiming the whole system is "quantum-resistant" | 🚫 Not claimed (see the limits in the ML-KEM section) |
-| Sender identity verification | ⏳ Not built yet (encryption does not prove who sent a file) |
+| Sender identity verification (hybrid Ed25519 + ML-DSA-65 signatures) | 🧩 Built and tested in `core/`, not connected to the app tabs yet. Packages made by the app are still unsigned |
 | Sending over a real network | ⏳ Not built yet |
 
 **Use test files only. Do not upload real secrets.** Encryption is connected, but this is an unaudited hackathon prototype. It does not prove who the sender is.
@@ -145,6 +145,59 @@ Read these limits before you trust it:
 - There has been no independent security audit.
 - The Streamlit app now uses this module. The tabs still run in one browser session, so treat that as a demo of the buttons, not as two separate computers. The sender tab never displays the private key.
 
+## Proving who sent it (hybrid signatures, package version 2)
+
+ML-KEM keeps a file secret, but **anyone with the receiver's public key can build a valid version 1 package**. Signed packages fix that.
+`core/signatures.py` and `core/signed_transfer.py` add a sender identity made of **two** signing keys, Ed25519 and **ML-DSA-65 (NIST FIPS 204)**.
+**Both** signatures must verify, so a forger has to break both algorithms. There is no "one is enough" mode and no silent fallback:
+if ML-DSA is missing, QShield stops with `SignatureUnavailableError` and never checks Ed25519 alone.
+
+```python
+from core import signatures, signed_transfer
+from core.pq_transfer import generate_recipient_keypair
+
+# SENDER, once, on the sender's own computer
+identity = signatures.generate_signing_identity()
+signatures.save_signing_identity(identity, "alice.qsk", "a long passphrase")   # password protected (scrypt + AES-256-GCM)
+print(identity.public.fingerprint(pretty=True))   # read this out to the receiver
+share = identity.public.to_text()                 # safe to share
+
+# RECEIVER (already has an ML-KEM key pair)
+receiver_key = generate_recipient_keypair()
+alice = signatures.PublicIdentity.from_text(share, expected_fingerprint="...the fingerprint Alice read out...")
+
+# SENDER
+package = signed_transfer.sign_and_encrypt(file_bytes, receiver_key.public_key(), identity, filename="plan.pdf")
+
+# RECEIVER
+result = signed_transfer.decrypt_and_verify(package, receiver_key, trusted_senders=[alice])
+result.data, result.filename, result.sender_fingerprint, result.created_at, result.package_id
+```
+
+What it gives you, and how:
+- **The signature covers everything:** the file, the file name, the creation time, the sender's key fingerprint, and a hash of the package header.
+- **Bound to one recipient and one package.** Bob cannot pass Alice's signed file on to Carol as if Alice had sent it to Carol, and a signature cannot be moved into another package.
+- **Hidden from outsiders.** The signature, sender identity, file name and size sit *inside* the encryption (the version 1 package left the file name readable).
+- **No downgrade.** `decrypt_and_verify` refuses a version 1 (unsigned) package and `trusted_senders` is required. A key inside the package is never trusted.
+- **Nothing is released early.** Contents come back only after the key, decryption, sender, both signatures, file name and (optional) age checks all pass.
+- **Optional replay defence:** `max_age_seconds=...`, and every result has a unique `package_id` you can remember.
+
+Read these limits before you trust it:
+- **A signature only proves "made by the holder of this key".** You must confirm the sender's fingerprint over a second channel (phone, in person). `PublicIdentity.from_text(..., expected_fingerprint=...)` does the comparison.
+- **No key revocation.** If a sender's key is stolen, every receiver must stop trusting it themselves.
+- **No forward secrecy** for the receiver's long-term ML-KEM key (same as version 1).
+- **No deniability.** The receiver can prove to others that the sender signed it.
+- The Streamlit tabs do **not** use this yet. They still make unsigned version 1 packages. The status page says so.
+- Python cannot reliably erase secrets from memory. No independent security audit has been done.
+
+**One-time step:** create the frozen version 2 test vector with the real libraries and commit it:
+
+```
+python tests/make_golden_signed_v2.py
+```
+
+Until that file exists, `test_version_2_golden_package_still_opens` is skipped.
+
 ## Two-device demo (optional Supabase relay)
 
 If `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` are set, the Sender and Receiver tabs get extra code boxes. Without them the app works exactly as before.
@@ -172,7 +225,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-Add `-v` to see every test name. You should see `98 passed`.
+Add `-v` to see every test name. Everything should pass. The one skip is the version 2 golden-vector test, until you create its file (see above).
 
 What the tests prove:
 - **Encryption works:** files of many sizes are encrypted and recovered, with and without ML-KEM.
@@ -182,6 +235,7 @@ What the tests prove:
 - **ML-KEM-768 is the real thing:** a separate implementation (`kyber-py`, used only in the tests) agrees with the library, and can open a QShield package.
 - **Format version 1 is frozen:** a saved version-1 package in `tests/data/` must keep opening. Its key is a public test key, so never use it for real data.
 - **No silent fallback:** if ML-KEM is unavailable, QShield stops.
+- **Forgeries fail:** an untrusted sender, a stolen identity claim, a changed file, name or time, a re-addressed package, a package with only one valid signature half, and an unsigned version 1 package are all rejected.
 
 ## What is in each file
 
@@ -196,6 +250,8 @@ qshield/
 │   ├── file_utils.py       SHA-256 fingerprint, file size text.
 │   ├── file_crypto.py      AES-256-GCM encrypt / decrypt.
 │   ├── pq_transfer.py      ML-KEM-768 + HKDF + AES-256-GCM transfer packages.
+│   ├── signatures.py       Hybrid Ed25519 + ML-DSA-65 signatures, sender identities, protected key files.
+│   ├── signed_transfer.py  Signed + encrypted version 2 packages (sign_and_encrypt, decrypt_and_verify).
 │   ├── transfer_flow.py    Glue used by the Sender and Receiver tabs.
 │   ├── state.py            Shared memory between the tabs.
 │   └── security_status.py  The honest list of working / not-built features.
@@ -207,6 +263,9 @@ qshield/
     ├── test_file_crypto.py    Tests for the AES-256-GCM module.
     ├── test_pq_transfer.py    Tests for ML-KEM transfer packages.
     ├── test_mlkem_interop.py  Checks the library's ML-KEM against a second implementation.
+    ├── test_signatures.py     Tests for the hybrid signature module and identity files.
+    ├── test_signed_transfer.py Tests for signed packages, including forgery and forwarding attacks.
+    ├── make_golden_signed_v2.py  Run once to create the frozen version 2 test vector.
     ├── test_app_integration.py Website encrypt/decrypt flow (no browser).
     └── data/golden_package_v1.json  Saved version-1 package (public TEST key only).
 ```
