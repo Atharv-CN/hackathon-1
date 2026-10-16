@@ -1,7 +1,8 @@
 """Glue used by the Streamlit tabs. No new cryptographic algorithms.
 
-Every function here calls core/pq_transfer.py (ML-KEM-768 + HKDF-SHA256 +
-AES-256-GCM). The encrypted package format is unchanged.
+Every function here calls core/pq_transfer.py (ML-KEM + HKDF-SHA256 +
+AES-256-GCM). The receiver picks one of three suites when making keys:
+1 = ML-KEM-768, 2 = X25519 + ML-KEM-768 (hybrid), 3 = ML-KEM-1024.
 """
 
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from core.pq_transfer import (
     load_private_key_from_bytes,
     private_key_to_protected_pem,
     public_key_fingerprint,
+    suite_name,
     public_key_from_text,
     public_key_to_text,
 )
@@ -30,13 +32,15 @@ class RecipientKeyBundle:
     fingerprint: str
     fingerprint_pretty: str
     protected_pem: bytes
+    suite: int = 1
+    suite_name: str = "ML-KEM-768"
 
 
-def create_recipient_key_bundle(password: str) -> RecipientKeyBundle:
-    """Make an ML-KEM-768 pair and immediately wrap the private key in a password."""
+def create_recipient_key_bundle(password: str, suite: int = 1) -> RecipientKeyBundle:
+    """Make a key pair for the chosen suite and immediately wrap the private key in a password."""
     if not password:
         raise ValueError("A password is required to protect the private key file.")
-    private_key = generate_recipient_keypair()
+    private_key = generate_recipient_keypair(suite)
     public_key = private_key.public_key()
     protected_pem = private_key_to_protected_pem(private_key, password)
     return RecipientKeyBundle(
@@ -44,6 +48,8 @@ def create_recipient_key_bundle(password: str) -> RecipientKeyBundle:
         fingerprint=public_key_fingerprint(public_key),
         fingerprint_pretty=public_key_fingerprint(public_key, pretty=True),
         protected_pem=protected_pem,
+        suite=suite,
+        suite_name=suite_name(suite),
     )
 
 

@@ -6,7 +6,7 @@ import streamlit as st
 
 import relay
 from core.file_utils import human_size, sha256_of_bytes
-from core.pq_transfer import public_key_fingerprint, public_key_from_text
+from core.pq_transfer import public_key_fingerprint, public_key_from_text, suite_name, suite_of
 from core.transfer_flow import encrypt_uploaded_file, package_download_name
 
 
@@ -14,7 +14,8 @@ def show_sender() -> None:
     st.header("📤 Sender")
     st.write(
         "Upload a **test file** (not real secrets) and paste the receiver's "
-        "public key. QShield encrypts the file with ML-KEM-768 + AES-256-GCM."
+        "public key. QShield uses the algorithm suite that the public key was made "
+        "for (ML-KEM-768, X25519 + ML-KEM-768, or ML-KEM-1024) with AES-256-GCM."
     )
     st.caption(
         "Encryption hides the file contents from anyone who does not have the "
@@ -71,6 +72,8 @@ def show_sender() -> None:
                     "original_name": uploaded.name,
                     "original_size": len(uploaded.getvalue()),
                     "recipient_fingerprint": public_key_fingerprint(public_key, pretty=True),
+                    "suite": suite_of(public_key),
+                    "suite_name": suite_name(suite_of(public_key)),
                     "prepared_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "relay_code": None,
                 }
@@ -85,6 +88,8 @@ def show_sender() -> None:
     st.write(f"**Original file:** {encrypted['original_name']} ({human_size(encrypted['original_size'])})")
     st.write(f"**Encrypted at:** {encrypted['prepared_at']}")
     st.write(f"**Package size:** {human_size(len(encrypted['package_bytes']))}")
+    if encrypted.get("suite_name"):
+        st.write(f"**Algorithm suite:** {encrypted['suite']} ({encrypted['suite_name']})")
     if encrypted.get("recipient_fingerprint"):
         st.caption(f"Encrypted for public-key fingerprint: {encrypted['recipient_fingerprint']}")
 

@@ -9,7 +9,8 @@ def show_security_status() -> None:
     st.header("🛡️ Security Status")
 
     st.info(
-        "AES-256-GCM, ML-KEM-768 key establishment, and encrypted-file integrity "
+        "AES-256-GCM, ML-KEM key establishment (ML-KEM-768, hybrid X25519 + "
+        "ML-KEM-768, or ML-KEM-1024), and encrypted-file integrity "
         "checks are implemented and connected to the Sender and Receiver tabs."
     )
     st.warning(
