@@ -29,6 +29,18 @@ PACKAGE LAYOUT (version 1). Every field has a fixed size.
   It is only a label: the real protection is that the AES key cannot be
   derived without the right private key.
 
+PACKAGE VERSIONS
+  - Version 1 (suite 1): one AES-GCM message. encrypt_for_recipient() /
+    decrypt_package() work on complete `bytes`, so version 1 is whole-file, in memory,
+    and limited to ~2 GB. It is frozen: old packages and the golden test vector open.
+  - Version 2 (suite 2): STREAM construction, bounded memory, no 2 GB limit.
+    encrypt_stream_for_recipient() / decrypt_package_stream() work on file objects;
+    encrypt_file_for_recipient() / decrypt_package_file() use it for files on disk.
+    decrypt_package() also opens version 2 packages, but because it RETURNS bytes
+    that call necessarily holds the whole file in memory.
+  The reader dispatches on the validated version byte. A version 2 package is never
+  handed to the version 1 code (or the other way round) and unknown versions fail.
+
 IMPORTANT LIMITS - please read
   - NO SENDER IDENTITY. Anyone who has the recipient's public key can make a
     valid package. The receiver cannot tell who sent it. (Digital signatures
@@ -54,7 +66,9 @@ import binascii
 import functools
 import hashlib
 import hmac
+import io
 import os
+import stat
 import struct
 from pathlib import Path
 
@@ -87,6 +101,23 @@ HEADER_SIZE = _PREFIX.size + KEM_CIPHERTEXT_SIZE   # 38 + 1088 = 1126
 # Written into the key derivation so keys made for QShield can never be
 # confused with keys made for something else.
 KDF_LABEL = b"QShield v1: ML-KEM-768 + HKDF-SHA256 + AES-256-GCM"
+
+# ---- Streaming packages (version 2) -------------------------------------------
+# Same outer header as version 1 (magic, version, suite, recipient fingerprint, KEM
+# ciphertext), but version = 2 and suite = 2, followed by a streaming body:
+#   outer header (1126 B) | segment size (4) | metadata length (4) | metadata JSON
+#   | STREAM header (40 B: length, salt, nonce prefix) | AES-256-GCM segments
+# Keys: ML-KEM shared secret (32 B, fresh per package)
+#         --HKDF-SHA256(salt = STREAM salt, info = label | 0x00 | outer header | envelope)-->
+#       one AES-256 key for every segment. Nothing else is derived and nothing is stored.
+# Segments, nonces, the final-segment flag and the 2**32 segment limit follow the STREAM
+# construction exactly as described in core/file_crypto.py.
+# Version 1 packages are untouched and still open; the reader picks the path from the
+# validated version byte and never falls back from one to the other.
+VERSION_STREAM = 2
+SUITE_MLKEM768_HKDF_SHA256_AES256GCM_STREAM = 2
+KDF_LABEL_STREAM = b"QShield v2 stream: ML-KEM-768 + HKDF-SHA256 + AES-256-GCM-STREAM"
+_LEGACY_MAX_PACKAGE = file_crypto.MAX_PLAINTEXT_SIZE + file_crypto.MAX_METADATA_SIZE + HEADER_SIZE + 64
 
 
 # ---- Errors -----------------------------------------------------------------
@@ -294,6 +325,10 @@ def decrypt_package(package: bytes, recipient_private_key: MLKEM768PrivateKey) -
     magic, version, suite, fingerprint = _PREFIX.unpack_from(package, 0)
     if magic != MAGIC:
         raise TransferError("This is not a QShield transfer package.")
+    if version == VERSION_STREAM:
+        sink = io.BytesIO()
+        result = _decrypt_stream_package(io.BytesIO(package), sink, recipient_private_key)
+        return DecryptedFile(filename=result.filename, data=sink.getvalue(), metadata=result.metadata)
     if version != VERSION:
         raise TransferError(f"Unsupported package version: {version}.")
     if suite != SUITE_MLKEM768_HKDF_SHA256_AES256GCM:
@@ -322,21 +357,145 @@ def decrypt_package(package: bytes, recipient_private_key: MLKEM768PrivateKey) -
         ) from None
 
 
+# ---- Streaming recipient packages (version 2) ----------------------------------
+def _stream_context(outer_header: bytes, envelope: bytes) -> bytes:
+    """HKDF `info` for a version 2 package: binds the whole outer header (version, suite,
+    recipient fingerprint, KEM ciphertext) and the envelope (segment size, metadata)."""
+    return KDF_LABEL_STREAM + b"\x00" + outer_header + envelope
+
+
+@_no_fallback
+def encrypt_stream_for_recipient(src, dst, recipient_public_key: MLKEM768PublicKey,
+                                 filename: str = "file", *, size=None,
+                                 segment_size: int = file_crypto.DEFAULT_SEGMENT_SIZE) -> int:
+    """Encrypt a binary file-like `src` for a recipient, writing a version 2 package to `dst`.
+
+    Bounded memory (a few segments). Only the recipient's PUBLIC key is accepted. Returns
+    the number of plaintext bytes. If `size` is given and the input differs, ValueError is
+    raised and the caller must discard `dst` (encrypt_file_for_recipient does).
+    """
+    if isinstance(recipient_public_key, MLKEM768PrivateKey):
+        raise TypeError(
+            "Give the recipient's PUBLIC key, not a private key. "
+            "A private key must never leave the receiving side."
+        )
+    if not isinstance(recipient_public_key, MLKEM768PublicKey):
+        raise TypeError("recipient_public_key must be an ML-KEM-768 public key.")
+
+    shared_secret, kem_ciphertext = recipient_public_key.encapsulate()
+    if len(shared_secret) != SHARED_SECRET_SIZE or len(kem_ciphertext) != KEM_CIPHERTEXT_SIZE:
+        raise TransferError("The ML-KEM library returned unexpected sizes. Stopping.")
+
+    outer = _PREFIX.pack(
+        MAGIC, VERSION_STREAM, SUITE_MLKEM768_HKDF_SHA256_AES256GCM_STREAM,
+        _fingerprint_bytes(recipient_public_key),
+    ) + kem_ciphertext
+    envelope = file_crypto.pack_stream_envelope(
+        segment_size, file_crypto.build_stream_metadata(filename, size)
+    )
+    dst.write(outer + envelope)
+    total = file_crypto.encrypt_stream_body(
+        src, dst, shared_secret, _stream_context(outer, envelope), segment_size
+    )
+    if size is not None and total != size:
+        raise ValueError("The input changed size while it was being encrypted.")
+    return total
+
+
+@_no_fallback
+def _decrypt_stream_package(src, dst, recipient_private_key: MLKEM768PrivateKey):
+    if not isinstance(recipient_private_key, MLKEM768PrivateKey):
+        raise TypeError("recipient_private_key must be an ML-KEM-768 private key.")
+    try:
+        outer = file_crypto._read_up_to(src, HEADER_SIZE)
+        if len(outer) < HEADER_SIZE:
+            raise TransferError("This is too short to be a QShield transfer package.")
+        magic, version, suite, fingerprint = _PREFIX.unpack_from(outer, 0)
+        if magic != MAGIC:
+            raise TransferError("This is not a QShield transfer package.")
+        if version != VERSION_STREAM:
+            raise TransferError(f"Unsupported package version: {version}.")
+        if suite != SUITE_MLKEM768_HKDF_SHA256_AES256GCM_STREAM:
+            raise TransferError(f"Unsupported algorithm suite for package version {version}: {suite}.")
+        if not hmac.compare_digest(fingerprint, _fingerprint_bytes(recipient_private_key.public_key())):
+            raise WrongRecipientError(
+                "This package was made for a different recipient key. "
+                "Ask the sender to encrypt it again with your public key."
+            )
+        segment_size, metadata_bytes, envelope = file_crypto.read_stream_envelope(src)
+        # ML-KEM never raises on a damaged ciphertext (it returns a different secret), so
+        # the first segment's authentication tag is what catches a damaged KEM ciphertext.
+        shared_secret = recipient_private_key.decapsulate(outer[_PREFIX.size:])
+        total = file_crypto.decrypt_stream_body(
+            src, dst, shared_secret, _stream_context(outer, envelope), segment_size
+        )
+        filename, metadata = file_crypto.parse_stream_metadata(metadata_bytes, total)
+    except TransferError:
+        raise
+    except DecryptionError as exc:
+        raise TransferError(str(exc)) from None
+    return file_crypto.DecryptedStream(filename=filename, metadata=metadata, size=total)
+
+
+def decrypt_package_stream(src, dst, recipient_private_key: MLKEM768PrivateKey):
+    """Decrypt a version 2 package from a binary file-like `src`, writing plaintext to `dst`.
+
+    WARNING: `dst` receives chunks before the end of the stream is verified. If this raises,
+    discard whatever was written. decrypt_package_file() does that safely.
+    """
+    return _decrypt_stream_package(src, dst, recipient_private_key)
+
+
 # ---- Files on disk ------------------------------------------------------------
 def encrypt_file_for_recipient(input_path, output_path, recipient_public_key: MLKEM768PublicKey,
-                               overwrite: bool = False) -> Path:
-    """Read a file, encrypt it for the recipient, and write the package."""
+                               overwrite: bool = False, *,
+                               segment_size: int = file_crypto.DEFAULT_SEGMENT_SIZE) -> Path:
+    """Encrypt a file for a recipient with the STREAMING package format (version 2).
+
+    Bounded memory, no 2 GB limit. The package is written to a private temporary file and
+    moved into place only when complete; an existing output is never replaced unless
+    overwrite=True."""
     input_path, output_path = Path(input_path), Path(output_path)
-    package = encrypt_for_recipient(input_path.read_bytes(), recipient_public_key,
-                                    filename=input_path.name)
+    if not overwrite and (output_path.exists() or output_path.is_symlink()):
+        raise FileExistsError(str(output_path))
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "wb" if overwrite else "xb") as f:  # "xb": never overwrite
-        f.write(package)
+    with open(input_path, "rb") as src:
+        st = os.fstat(src.fileno())
+        size = st.st_size if stat.S_ISREG(st.st_mode) else None   # pipes/FIFOs: length unknown in advance
+        out, temp_path = file_crypto.create_private_temp(output_path.parent)
+        try:
+            with out:
+                encrypt_stream_for_recipient(
+                    src, out, recipient_public_key, input_path.name,
+                    size=size, segment_size=segment_size,
+                )
+                file_crypto.sync_temp(out)
+            file_crypto.publish(temp_path, output_path, overwrite)
+        except BaseException:
+            file_crypto._discard(temp_path)
+            raise
     return output_path
 
 
 def decrypt_package_file(package_path, output_dir, recipient_private_key: MLKEM768PrivateKey,
                          overwrite: bool = False) -> Path:
-    """Open a package file into output_dir. Written only after every check passes."""
-    result = decrypt_package(Path(package_path).read_bytes(), recipient_private_key)
+    """Open a package file into output_dir. Published only after every check passes.
+
+    Version 2 (streaming) packages are decrypted incrementally into a private temporary file
+    (bounded memory) and published only after the final segment and the end of the file
+    verify. Version 1 packages are opened in memory as before, and refused if the file is
+    larger than that format can hold. Unknown versions are refused; there is no fallback."""
+    with open(Path(package_path), "rb") as src:
+        head = src.read(5)
+        src.seek(0)
+        if len(head) == 5 and head[:4] == MAGIC and head[4] == VERSION_STREAM:
+            return file_crypto.decrypt_to_directory(
+                src, output_dir, overwrite,
+                lambda s, d: _decrypt_stream_package(s, d, recipient_private_key),
+            )
+        if os.fstat(src.fileno()).st_size > _LEGACY_MAX_PACKAGE:
+            raise TransferError("This is too large to be a version 1 QShield package.")
+        # Everything else (version 1, damaged, or unsupported) goes through decrypt_package,
+        # which accepts only what it recognises and raises a clear error otherwise.
+        result = decrypt_package(src.read(), recipient_private_key)
     return file_crypto.write_decrypted_file(result, output_dir, overwrite)

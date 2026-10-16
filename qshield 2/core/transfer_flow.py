@@ -4,6 +4,7 @@ Every function here calls core/pq_transfer.py (ML-KEM-768 + HKDF-SHA256 +
 AES-256-GCM). The encrypted package format is unchanged.
 """
 
+import io
 import time
 from dataclasses import dataclass
 
@@ -12,6 +13,7 @@ from core.file_crypto import DecryptedFile
 from core.pq_transfer import (
     decrypt_package,
     encrypt_for_recipient,
+    encrypt_stream_for_recipient,
     generate_recipient_keypair,
     load_private_key_from_bytes,
     private_key_to_protected_pem,
@@ -114,3 +116,29 @@ def encrypt_for_verified_key(file_bytes: bytes, filename: str, verified: identit
     if not isinstance(verified, identity.VerifiedKey):
         raise TypeError("Only an authenticated key (VerifiedKey) can be used here.")
     return encrypt_for_recipient(file_bytes, public_key_from_bytes(verified.kem_public_key), filename=filename)
+
+
+# ---- Streaming from an upload handle (version 2 packages) -----------------------------
+# Streamlit's UploadedFile is an in-memory file object, so this reads it in segments
+# instead of calling .getvalue(), but the framework has already buffered the whole upload
+# and the result is returned as bytes for the download button. See README.
+def encrypt_stream_to_package(file_obj, filename: str, size: int, public_key, *, legacy: bool = False) -> bytes:
+    """Encrypt an open binary file object for a recipient and return the package bytes.
+
+    legacy=True makes a version 1 package (the only kind the browser app can open)."""
+    file_obj.seek(0)
+    if legacy:
+        return encrypt_for_recipient(file_obj.read(), public_key, filename=filename)
+    out = io.BytesIO()
+    encrypt_stream_for_recipient(file_obj, out, public_key, filename, size=size)
+    return out.getvalue()
+
+
+def encrypt_stream_for_verified_key(file_obj, filename: str, size: int,
+                                    verified: identity.VerifiedKey, *, legacy: bool = False) -> bytes:
+    """Like encrypt_for_verified_key(), but reads from a file object."""
+    if not isinstance(verified, identity.VerifiedKey):
+        raise TypeError("Only an authenticated key (VerifiedKey) can be used here.")
+    return encrypt_stream_to_package(
+        file_obj, filename, size, public_key_from_bytes(verified.kem_public_key), legacy=legacy
+    )

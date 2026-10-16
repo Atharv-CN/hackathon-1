@@ -92,7 +92,8 @@ What it does:
 - Makes a fresh random nonce for every encryption.
 - Checks the file contents **and** the header (the file name, size and format version) when decrypting. If even one bit was changed, decryption fails and returns nothing.
 - Never has a built-in key. The key is always passed in, and `generate_key()` makes a new random one.
-- Has `encrypt_file()` and `decrypt_file()` for files on disk. They never overwrite an existing file unless you ask.
+- Has `encrypt_file()` and `decrypt_file()` for files on disk. They now use the **streaming format** (see "Large files" below), never overwrite an existing file unless you ask, and never leave a half-written file behind.
+- `encrypt_bytes()` / `decrypt_bytes()` are the original **whole-file, in-memory** functions (version 1, about 2 GB at most).
 
 What it does **not** do (read this before you trust it):
 - The **file name is visible**. It is checked for changes, but it is not secret. Only the file contents are secret.
@@ -146,6 +147,29 @@ Read these limits before you trust it:
 - There has been no independent security audit.
 - The Streamlit app now uses this module. The tabs still run in one browser session, so treat that as a demo of the buttons, not as two separate computers. The sender tab never displays the private key.
 
+## Large files (streaming encryption)
+
+Version 1 encrypted a whole file with one AES-GCM call, so memory use equalled the file size and the library capped it at about 2 GB. QShield now also has a **streaming format** built on the STREAM construction (the documented Google Tink AES-GCM-HKDF scheme, implemented with `cryptography`'s AES-GCM and HKDF): the file is split into 1 MiB segments, each authenticated separately, and the last segment is authenticated as "final" so a cut-off file is detected.
+
+```python
+from core.file_crypto import generate_key, encrypt_file, decrypt_file
+from core.pq_transfer import encrypt_file_for_recipient, decrypt_package_file
+
+encrypt_file("movie.mkv", "movie.mkv.qshield", key)             # bounded memory, any size
+decrypt_file("movie.mkv.qshield", "out/", key)                  # published only if EVERYTHING verifies
+encrypt_file_for_recipient("movie.mkv", "m.qshield", public_key)    # ML-KEM + streaming (package version 2)
+decrypt_package_file("m.qshield", "out/", private_key)
+```
+
+- **Memory:** a few segments (about 3-4 MiB with the default size), whatever the file size. Measured here: 2 GiB + 12 KB encrypted and decrypted with a process peak of about 40 MiB. The old ~2 GB single-buffer limit is gone for the file/stream functions; the limit is now 2**32 segments (about 4 PiB).
+- **Safe output:** decryption goes to a private temporary file and is published only after the final segment and end-of-file verify. A failure deletes the temporary file and leaves any existing destination alone.
+- **Stream APIs:** `encrypt_stream` / `decrypt_stream` and `encrypt_stream_for_recipient` / `decrypt_package_stream` work on open binary files. Their output may contain already-verified chunks before a later failure, so they are for callers that handle that (the `*_file` functions do).
+- **Which APIs are NOT bounded-memory:** anything that takes or returns `bytes` (`encrypt_bytes`, `decrypt_bytes`, `encrypt_for_recipient`, `decrypt_package`). `decrypt_package` and `decrypt_bytes` can open the new formats, but they hold the result in memory.
+- **Compatibility:** version 1 files and packages (and the golden vector) still open. The new package format is `QSHK` **version 2**. **The browser app and older QShield versions cannot open version 2**; tick "Make a version 1 package" in the Sender tab for them. Details: [`docs/STREAMING_FORMAT.md`](docs/STREAMING_FORMAT.md).
+- **Not verified:** interoperability with Google Tink's own library. The tests check the code against an independent implementation of the documented construction.
+
+**The web app still buffers whole files.** Streamlit's uploader keeps the entire upload in the server's memory (an `UploadedFile` is an in-memory file object) and `st.download_button` takes the finished bytes, so the Sender and Receiver tabs are **not** end-to-end streaming. The crypto reads and writes in segments, but the file is already in memory when it gets there. `maxUploadSize` is still 25 MB in `.streamlit/config.toml`, and relay uploads are capped at 5 MB. For big files use the Python functions above on disk. (This describes Streamlit's documented behaviour; it was not measured in this environment.)
+
 ## Two-device demo (optional Supabase relay)
 
 If `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` are set, the Sender and Receiver tabs get extra code boxes. Without them the app works exactly as before.
@@ -183,6 +207,7 @@ What the tests prove:
 - **Wrong keys are rejected:** a package for a different recipient key cannot be opened, even if the fingerprint label is forged.
 - **The private key stays private:** it is not in the package and not in the shared public key, and it is saved only password-protected.
 - **ML-KEM-768 is the real thing:** a separate implementation (`kyber-py`, used only in the tests) agrees with the library, and can open a QShield package.
+- **Streaming is correct and bounded:** every chunk boundary, truncation at every length, reordered / removed / duplicated / transplanted segments, wrong final flags, trailing data, bad headers, counter overflow, and failed writes are tested; a 2 GiB+ stream is processed through a bounded pipe (set `QSHIELD_SKIP_LARGE_TESTS=1` to skip it on a very slow machine).
 - **Format version 1 is frozen:** a saved version-1 package in `tests/data/` must keep opening. Its key is a public test key, so never use it for real data.
 - **No silent fallback:** if ML-KEM is unavailable, QShield stops.
 
@@ -214,6 +239,8 @@ qshield/
     ├── test_pq_transfer.py    Tests for ML-KEM transfer packages.
     ├── test_mlkem_interop.py  Checks the library's ML-KEM against a second implementation.
     ├── test_app_integration.py Website encrypt/decrypt flow (no browser).
+    ├── test_streaming.py        STREAM format: boundaries, tampering, truncation, memory, 2 GiB stream.
+    ├── test_streaming_pq.py     Streaming ML-KEM packages (version 2) and the key hierarchy.
     ├── test_key_authentication.py      Adversarial tests: key substitution, rollback, revocation, legacy.
     ├── test_key_authentication_e2e.py  Original attack vs the fix, with real ML-KEM.
     └── data/golden_package_v1.json  Saved version-1 package (public TEST key only).
@@ -228,4 +255,4 @@ qshield/
 | `streamlit: command not found` | Activate the environment (Step 1), then try again. |
 | `ModuleNotFoundError` | Run `pip install -r requirements.txt` again. |
 | Port 8501 is busy | Run `streamlit run app.py --server.port 8502` |
-| File is rejected as too big | The limit is 25 MB. Change `maxUploadSize` in `.streamlit/config.toml`. |
+| File is rejected as too big | The web app's limit is 25 MB (Streamlit keeps uploads in memory). Change `maxUploadSize` in `.streamlit/config.toml`, or use `encrypt_file()` / `encrypt_file_for_recipient()` from Python for large files. |

@@ -207,7 +207,8 @@ def test_random_bytes_and_empty_input_are_not_packages(recipient):
 def test_unknown_version_or_suite_is_refused(recipient, recipient_public):
     package = bytearray(pq.encrypt_for_recipient(b"data", recipient_public))
 
-    wrong_version = bytearray(package); wrong_version[4] = 2
+    # Version 2 is the streaming format now (see test_streaming_pq.py), so 3 is the first unknown one.
+    wrong_version = bytearray(package); wrong_version[4] = 3
     with pytest.raises(pq.TransferError, match="version"):
         pq.decrypt_package(bytes(wrong_version), recipient)
 

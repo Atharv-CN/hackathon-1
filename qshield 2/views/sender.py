@@ -12,8 +12,8 @@ from core.identity import KeyAuthError
 from core.key_directory import fetch_authenticated_receiver_key
 from core.pq_transfer import public_key_fingerprint, public_key_from_bytes, public_key_from_text
 from core.transfer_flow import (
-    encrypt_for_verified_key,
-    encrypt_uploaded_file,
+    encrypt_stream_for_verified_key,
+    encrypt_stream_to_package,
     package_download_name,
 )
 from core.trust_store import TrustStore, TrustStoreError
@@ -82,6 +82,10 @@ def show_sender() -> None:
         placeholder="Paste the public key from the Receiver tab",
         key="sender_public_key",
     )
+    legacy_package = st.checkbox(
+        "Make a version 1 package (needed to open it in the browser app; no large-file support)",
+        key="sender_legacy_package",
+    )
     manual_confirmed = False
     if public_key_text.strip():
         manual_confirmed = st.checkbox(
@@ -114,11 +118,15 @@ def show_sender() -> None:
                 if use_relay:
                     verified = fetch_authenticated_receiver_key(receiver_code, receiver_id, store)
                     public_key = public_key_from_bytes(verified.kem_public_key)
-                    package = encrypt_for_verified_key(uploaded.getvalue(), uploaded.name, verified)
+                    package = encrypt_stream_for_verified_key(
+                        uploaded, uploaded.name, uploaded.size, verified, legacy=legacy_package
+                    )
                     trust = verified
                 else:
                     public_key = public_key_from_text(public_key_text)
-                    package = encrypt_uploaded_file(uploaded.getvalue(), uploaded.name, public_key_text)
+                    package = encrypt_stream_to_package(
+                        uploaded, uploaded.name, uploaded.size, public_key, legacy=legacy_package
+                    )
             except KeyAuthError as exc:
                 st.error(f"🚫 Key NOT trusted: {exc}")
             except (ValueError, TypeError, relay.RelayError) as exc:
