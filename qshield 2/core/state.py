@@ -32,6 +32,7 @@ def init_state() -> None:
         "payment_ledger": {},
         "payment_attempt_id": None,
         "payment_error": None,
+        "payment_token": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:

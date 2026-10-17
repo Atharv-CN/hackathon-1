@@ -5,6 +5,7 @@ import secrets
 import streamlit as st
 
 from core.mock_provider import MAX_AMOUNT_PAISE, MIN_AMOUNT_PAISE, TEST_CARDS, PaymentInputError, charge
+from core.token_store import TokenError, get_store
 
 
 def _rupees(paise: int) -> str:
@@ -19,6 +20,8 @@ def _submit() -> None:
     amount_paise = int(round(ss["pay_amount"] * 100))
     ss["pay_card"] = ss["pay_expiry"] = ss["pay_cvv"] = ""  # wipe first, use local copies below
     ss["payment_error"] = None
+    ss["payment_token"] = None
+    ss["payment_result"] = None  # a failed attempt must not leave an old success on screen
     if not name.strip():
         ss["payment_error"] = "Enter the name on the card."
         return
@@ -32,6 +35,19 @@ def _submit() -> None:
         return
     ss["payment_result"] = result
     ss["payment_attempt_id"] = secrets.token_urlsafe(16)  # next submit = a NEW payment
+    if result.status == "succeeded":
+        _issue_token()
+
+
+def _issue_token() -> None:
+    """Make (or re-fetch) the token for the last successful payment. Safe to repeat:
+    the same payment always gives the same token."""
+    ss = st.session_state
+    try:
+        ss["payment_token"] = get_store().issue(ss["payment_result"])
+        ss["payment_error"] = None
+    except TokenError as exc:
+        ss["payment_error"] = f"Payment succeeded, but the token was not saved: {exc}"
 
 
 def show_payment() -> None:
@@ -74,3 +90,15 @@ def show_payment() -> None:
             st.error(f"{result.message} {result.brand} •••• {result.last4}")
         st.caption(f"Provider reference: `{result.provider_ref}` · {result.created_at} · SIMULATED")
         st.caption("Only the brand and last 4 digits are kept. The full card number is discarded.")
+
+        if result.status == "succeeded":
+            token = st.session_state["payment_token"]
+            if token is None:
+                st.button("Create token", on_click=_issue_token, key="pay_create_token")
+            else:
+                st.markdown("**Payment token**")
+                st.code(token.token, language=None)
+                st.caption(
+                    f"Status: **{token.status}** · a random reference, not the card number · "
+                    f"Stored in: {get_store().name}"
+                )

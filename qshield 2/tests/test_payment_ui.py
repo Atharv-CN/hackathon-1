@@ -53,3 +53,33 @@ def test_two_payments_get_different_references_and_no_card_in_state():
     state = {k: app.session_state[k] for k in app.session_state.keys()}
     assert "4111111111111111" not in repr(state)
     assert "4111 1111 1111 1111" not in repr(state)
+
+
+def test_successful_payment_shows_token_with_status_created(monkeypatch):
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_KEY", raising=False)
+    app = AppTest.from_file(APP).run()
+    fill(app, "4111111111111111")
+    tok = app.session_state["payment_token"]
+    assert tok.token.startswith("ptok_") and tok.status == "created"
+    assert tok.token in [c.value for c in app.code]
+    assert "4111111111111111" not in tok.token
+    assert any("NOT persistent" in c.value for c in app.caption)  # memory store is labelled honestly
+
+
+def test_declined_payment_creates_no_token():
+    app = AppTest.from_file(APP).run()
+    fill(app, "4000000000000002")
+    assert app.session_state["payment_token"] is None
+
+
+def test_new_payment_gets_new_token_and_failed_attempt_clears_old_success():
+    app = AppTest.from_file(APP).run()
+    fill(app, "4111111111111111")
+    t1 = app.session_state["payment_token"].token
+    fill(app, "5555555555554444")
+    t2 = app.session_state["payment_token"].token
+    assert t1 != t2
+    fill(app, "4242424242424242")  # refused -> nothing from the old payment left on screen
+    assert app.session_state["payment_result"] is None
+    assert app.session_state["payment_token"] is None
