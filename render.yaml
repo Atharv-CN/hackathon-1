@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: qshield-backup-creator
+    runtime: python
+    plan: free
+    rootDir: backup-service
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn creator:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.11
+      - key: BACKUP_DATABASE_URL
+        sync: false
+      - key: BACKUP_AES_KEY_B64
+        sync: false
+      - key: PRIMARY_TO_BACKUP_SECRET
+        sync: false
+  - type: web
+    name: qshield-backup-wallet
+    runtime: python
+    plan: free
+    rootDir: backup-service
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn wallet:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.11
+      - key: BACKUP_DATABASE_URL
+        sync: false
+      - key: BACKUP_AES_KEY_B64
+        sync: false
+      - key: WALLET_TO_BACKUP_SECRET
+        sync: false
