@@ -83,3 +83,13 @@ def test_new_payment_gets_new_token_and_failed_attempt_clears_old_success():
     fill(app, "4242424242424242")  # refused -> nothing from the old payment left on screen
     assert app.session_state["payment_result"] is None
     assert app.session_state["payment_token"] is None
+
+
+def test_app_is_payments_only_no_file_transfer_screens():
+    app = AppTest.from_file(APP).run()
+    assert not app.exception
+    assert [t.label for t in app.tabs] == ["Pay", "Wallet"]
+    text = " ".join(m.value for m in app.markdown)
+    assert "Receive" not in text and "Encrypt a file" not in text
+    # the only file input left is the Wallet person's private key
+    assert [u.key for u in app.file_uploader] == ["wallet_key_file"]

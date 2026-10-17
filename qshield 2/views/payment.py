@@ -145,8 +145,8 @@ def _show_handoff() -> None:
             st.markdown("**Handoff code for Wallet**")
             st.code(ss["handoff_code"], language=None)
         else:
-            st.caption("No relay configured: download the package and give it to Wallet.")
-            st.download_button("Download handoff package", package, "handoff.qshield", key="handoff_dl")
+            st.caption("Ready for Wallet in this browser session (open the Wallet tab). "
+                       "To reach Wallet on another device, connect Supabase.")
         st.caption("The CVV is never sent or stored. The Wallet team opens this in the Wallet tab "
                    "with their private key.")
     config, _ = load_config()

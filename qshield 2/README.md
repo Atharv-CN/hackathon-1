@@ -1,5 +1,23 @@
 # 🛡️ QShield
 
+## Payments demo (current app: `streamlit run app.py`)
+
+Flow: **Pay** (test card) → **QShield signs and encrypts** the details with AES-256-GCM (key from
+ML-KEM-768 via HKDF) and a random `ptok_…` token is made → the **Wallet** team opens it with their
+own private key, checks the Payments signature against a fingerprint confirmed by phone, and
+approves or rejects the token (`created → sent → approved/rejected`).
+
+- TEST cards only. The payment provider is a mock (`core/mock_provider.py`); no money moves.
+- The CVV is never sent, stored or logged. The server sees the card number once, while encrypting.
+- One-time setup: `python make_handoff_keys.py`, then put the printed settings in your host's
+  environment variables. The Wallet private key file stays with the Wallet person, not the server.
+- Tokens are stored in Supabase table `payment_tokens` (SQL in `core/token_store.py`); without
+  Supabase they live in memory and the page says so.
+- Not built yet: the backup route for when QShield is down. Not audited; not PCI-DSS compliant.
+- The older file-transfer demo (Receive / Send tabs) is still here: `streamlit run files_app.py`.
+
+---
+
 A 24-hour hackathon prototype for secure file sharing, built with Python and Streamlit.
 
 ## Current status (please read)

@@ -9,13 +9,10 @@ from core.wallet_handoff import HandoffError, load_config, open_handoff
 
 def _package_bytes():
     ss = st.session_state
-    uploaded = ss.get("wallet_pkg_file")
-    if uploaded is not None:
-        return uploaded.getvalue()
     code = (ss.get("wallet_code") or "").strip()
     if code:
         if not relay.is_configured():
-            raise HandoffError("No relay is configured, so a code cannot be looked up. Upload the package file instead.")
+            raise HandoffError("No relay is configured, so a code cannot be looked up. Use the handoff made in this browser session instead.")
         try:
             data, _name = relay.get(code, "package")
         except relay.RelayError as exc:
@@ -25,7 +22,7 @@ def _package_bytes():
         return data
     if ss.get("wallet_use_session") and ss.get("handoff_package"):
         return ss["handoff_package"]
-    raise HandoffError("Enter a handoff code, upload a package, or use the one from this session.")
+    raise HandoffError("Enter a handoff code, or tick 'Use the handoff made in this browser session'.")
 
 
 def _open() -> None:
@@ -68,7 +65,6 @@ def show_wallet() -> None:
     config, _missing = load_config()
 
     st.text_input("Handoff code", key="wallet_code")
-    st.file_uploader("…or upload a handoff package (.qshield)", key="wallet_pkg_file")
     st.checkbox("Use the handoff made in this browser session", key="wallet_use_session",
                 disabled=ss.get("handoff_package") is None)
     st.file_uploader("Your Wallet private key file (.pem)", key="wallet_key_file")

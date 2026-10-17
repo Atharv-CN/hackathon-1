@@ -6,7 +6,7 @@ from streamlit.testing.v1 import AppTest
 import relay
 from core.transfer_flow import create_recipient_key_bundle, decrypt_uploaded_package
 
-APP = str(Path(__file__).resolve().parents[1] / 'app.py')
+APP = str(Path(__file__).resolve().parents[1] / 'files_app.py')
 
 class Upload(BytesIO):
     def __init__(self, data, name):
