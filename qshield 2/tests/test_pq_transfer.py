@@ -16,6 +16,7 @@ from cryptography.hazmat.primitives.asymmetric.mlkem import (
     MLKEM768PrivateKey,
     MLKEM1024PrivateKey,
 )
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from core import file_crypto
@@ -207,7 +208,8 @@ def test_random_bytes_and_empty_input_are_not_packages(recipient):
 def test_unknown_version_or_suite_is_refused(recipient, recipient_public):
     package = bytearray(pq.encrypt_for_recipient(b"data", recipient_public))
 
-    wrong_version = bytearray(package); wrong_version[4] = 2
+    # Version 2 is the streaming format now (see test_streaming_pq.py), so 3 is the first unknown one.
+    wrong_version = bytearray(package); wrong_version[4] = 3
     with pytest.raises(pq.TransferError, match="version"):
         pq.decrypt_package(bytes(wrong_version), recipient)
 
@@ -283,10 +285,13 @@ def test_package_made_for_an_attacker_key_cannot_be_opened_by_the_real_recipient
 def test_keys_of_other_algorithms_or_types_are_refused(recipient, recipient_public):
     package = pq.encrypt_for_recipient(b"data", recipient_public)
 
-    with pytest.raises(TypeError):
-        pq.encrypt_for_recipient(b"data", MLKEM1024PrivateKey.generate().public_key())  # ML-KEM-1024, not 768
-    with pytest.raises(TypeError):
+    # A suite-1 key must not open a suite-3 (ML-KEM-1024) package, or the other way round.
+    with pytest.raises(pq.TransferError, match="suite"):
         pq.decrypt_package(package, MLKEM1024PrivateKey.generate())
+    with pytest.raises(TypeError):
+        pq.encrypt_for_recipient(b"data", X25519PrivateKey.generate().public_key())  # not a KEM key we support
+    with pytest.raises(TypeError):
+        pq.decrypt_package(package, X25519PrivateKey.generate())
     with pytest.raises(TypeError):
         pq.encrypt_for_recipient(b"data", b"x" * 1184)  # raw bytes are not a key object
     with pytest.raises(TypeError):

@@ -25,18 +25,52 @@ def get_feature_list() -> list[dict]:
             "Status": WORKING,
             "Details": (
                 "Implemented in core/file_crypto.py and used by the Sender Encrypt File "
-                "and Receiver Decrypt buttons. File contents are secret; the file name "
-                "is visible."
+                "and Receiver Decrypt buttons. File contents, file name, exact size and "
+                "time are all inside the encryption. The package length is still "
+                "visible unless optional padding is used."
             ),
         },
         {
-            "Feature": "Key establishment (ML-KEM-768 + HKDF-SHA256)",
+            "Feature": "Key establishment, suite 1 (ML-KEM-768 + HKDF-SHA256)",
             "Status": WORKING,
             "Details": (
                 "Implemented in core/pq_transfer.py and used by the app. The receiver "
                 "generates an ML-KEM-768 pair; the sender encrypts with the public key "
                 "only. The private key is downloaded password-protected and is never "
-                "shown to the sender. No independent security audit has been done."
+                "shown to the sender. ML-KEM only, no hybrid. No independent security "
+                "audit has been done."
+            ),
+        },
+        {
+            "Feature": "Hybrid key establishment, suite 2 (X25519 + ML-KEM-768 + HKDF-SHA256)",
+            "Status": WORKING,
+            "Details": (
+                "Both secrets go into the HKDF input, so an attacker must break both. "
+                "If a flaw were found in ML-KEM, X25519 still protects against attackers "
+                "using ordinary computers. A quantum computer breaks X25519, so against "
+                "a quantum attacker only the ML-KEM half protects. Same tests and "
+                "limits as suite 1."
+            ),
+        },
+        {
+            "Feature": "Higher security level, suite 3 (ML-KEM-1024 + HKDF-SHA256)",
+            "Status": WORKING,
+            "Details": (
+                "ML-KEM-1024 only. It adds safety margin with larger keys, but it is "
+                "the same algorithm family as suite 1, so it is not a hedge against a "
+                "flaw in ML-KEM itself."
+            ),
+        },
+        {
+            "Feature": "Forward-secret live sessions (ephemeral-KEM handshake)",
+            "Status": BUILT_NOT_CONNECTED,
+            "Details": (
+                "Implemented and tested in core/session.py (all three suites): a "
+                "separate session protocol, not used for .qshield files, and not "
+                "connected to the Streamlit app. If the server's long-term key leaks "
+                "after a session ended, the recorded session stays closed. The client "
+                "is not authenticated, and .qshield packages themselves still have no "
+                "forward secrecy."
             ),
         },
         {
@@ -49,20 +83,46 @@ def get_feature_list() -> list[dict]:
             ),
         },
         {
+            "Feature": "Relay public-key authentication (signed key bundles)",
+            "Status": WORKING,
+            "Details": (
+                "Keys fetched through the relay are accepted only if signed by the "
+                "QShield ID the sender got from the receiver by another channel. "
+                "Substituted, expired, rolled-back or unsigned keys are rejected. "
+                "Assumes the QShield ID itself was shared over a channel the relay does not control."
+            ),
+        },
+        {
             "Feature": "Claim that the whole system is 'quantum-resistant'",
             "Status": NOT_CLAIMED,
             "Details": (
-                "Only the key-establishment step uses a post-quantum algorithm "
-                "(ML-KEM-768). There are no digital signatures and no audit."
+                "The key-establishment step uses a post-quantum algorithm (ML-KEM; "
+                "suite 2 adds X25519, which is not post-quantum). Post-quantum "
+                "signatures are built (see below) but not connected to the app yet. "
+                "The relay's identity keys (Ed25519) are not post-quantum. Packages "
+                "have no forward secrecy (live sessions do, but are not connected to "
+                "the app) and there is no independent audit, so this is not claimed."
+            ),
+        },
+        {
+            "Feature": "Digital signatures (Ed25519 + ML-DSA-65, hybrid)",
+            "Status": BUILT_NOT_CONNECTED,
+            "Details": (
+                "Implemented in core/signatures.py. Both signatures must verify, so a "
+                "forger would have to break Ed25519 and ML-DSA-65 (NIST FIPS 204). "
+                "There is no fallback to a single algorithm. Not connected to the app "
+                "yet, no key revocation, no independent audit."
             ),
         },
         {
             "Feature": "Sender identity verification",
-            "Status": NOT_BUILT,
+            "Status": BUILT_NOT_CONNECTED,
             "Details": (
-                "Encryption does not prove who sent a file. Anyone who has the "
-                "receiver's public key can make a valid package. Digital signatures "
-                "are not built."
+                "Built and tested in core/signed_transfer.py but NOT used by the "
+                "Sender and Receiver tabs yet. Packages made by this app are still "
+                "unsigned: anyone who has the receiver's public key can make one. "
+                "Signed (version 2) packages prove which trusted sender made them. "
+                "Trust is only as good as the fingerprint check between people."
             ),
         },
         {
