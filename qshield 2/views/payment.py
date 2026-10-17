@@ -6,6 +6,8 @@ import streamlit as st
 
 from core.mock_provider import MAX_AMOUNT_PAISE, MIN_AMOUNT_PAISE, TEST_CARDS, PaymentInputError, charge
 from core.token_store import TokenError, get_store
+from core.wallet_handoff import HandoffError, build_handoff, load_config, payments_fingerprint
+import relay
 
 
 def _rupees(paise: int) -> str:
@@ -37,6 +39,33 @@ def _submit() -> None:
     ss["payment_attempt_id"] = secrets.token_urlsafe(16)  # next submit = a NEW payment
     if result.status == "succeeded":
         _issue_token()
+        _send_to_wallet(number, expiry, name)
+
+
+def _send_to_wallet(number: str, expiry: str, name: str) -> None:
+    """Lock + sign the payment details for the Wallet team. This is the only moment the
+    card details exist on the server; after this function returns they are gone.
+    The CVV is never passed in and never sent."""
+    ss = st.session_state
+    ss["handoff_package"] = ss["handoff_code"] = ss["handoff_error"] = None
+    token = ss["payment_token"]
+    if token is None:
+        return
+    config, missing = load_config()
+    if config is None:
+        ss["handoff_error"] = (
+            "Wallet handoff is not set up (missing: " + ", ".join(missing) + "). "
+            "The card details were discarded and NOTHING was sent to Wallet."
+        )
+        return
+    try:
+        package = build_handoff(config, token=token, payment=ss["payment_result"],
+                                card_number=number, expiry=expiry, cardholder=name)
+        code = relay.put("package", package, "handoff.qshield") if relay.is_configured() else None
+        ss["handoff_package"], ss["handoff_code"] = package, code
+        ss["payment_token"] = get_store().advance(token.token, "sent")
+    except (HandoffError, relay.RelayError, TokenError) as exc:
+        ss["handoff_error"] = f"The handoff to Wallet failed: {exc}"
 
 
 def _issue_token() -> None:
@@ -102,3 +131,26 @@ def show_payment() -> None:
                     f"Status: **{token.status}** · a random reference, not the card number · "
                     f"Stored in: {get_store().name}"
                 )
+                _show_handoff()
+
+
+def _show_handoff() -> None:
+    ss = st.session_state
+    if ss.get("handoff_error"):
+        st.warning(ss["handoff_error"])
+    package = ss.get("handoff_package")
+    if package:
+        st.success("🔐 Card details signed by Payments and encrypted with QShield for the Wallet team.")
+        if ss.get("handoff_code"):
+            st.markdown("**Handoff code for Wallet**")
+            st.code(ss["handoff_code"], language=None)
+        else:
+            st.caption("No relay configured: download the package and give it to Wallet.")
+            st.download_button("Download handoff package", package, "handoff.qshield", key="handoff_dl")
+        st.caption("The CVV is never sent or stored. The Wallet team opens this in the Wallet tab "
+                   "with their private key.")
+    config, _ = load_config()
+    fp = payments_fingerprint(config) if config else None
+    if fp:
+        with st.expander("Payments fingerprint (read this to Wallet over a phone call)"):
+            st.code(fp, language=None)

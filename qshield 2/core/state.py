@@ -33,6 +33,12 @@ def init_state() -> None:
         "payment_attempt_id": None,
         "payment_error": None,
         "payment_token": None,
+        # Handoff to the Wallet team (encrypted package only; never card details)
+        "handoff_package": None,
+        "handoff_code": None,
+        "handoff_error": None,
+        "wallet_opened": None,
+        "wallet_error": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
