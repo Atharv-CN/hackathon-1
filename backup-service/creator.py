@@ -76,10 +76,14 @@ async def create_handoff(request: Request, x_timestamp: str = Header(default="")
                 "wallet_status": prior["wallet_status"], "created": False}
 
     try:
-        envelope = StandbyCipher().encrypt(payload["request_id"], canonical(payload))
-    except (KeyError, ValueError) as exc:
+        cipher = StandbyCipher()
+    except KeyError as exc:
+        logger.error("Backup encryption key is missing", exc_info=exc)
+        raise HTTPException(503, "BACKUP_AES_KEY_B64 is missing on the creator service.") from exc
+    except ValueError as exc:
         logger.error("Backup encryption configuration failed", exc_info=exc)
-        raise HTTPException(503, "Check BACKUP_AES_KEY_B64 on the creator service.") from exc
+        raise HTTPException(503, str(exc)) from exc
+    envelope = cipher.encrypt(payload["request_id"], canonical(payload))
     record = {
         **envelope,
         "request_digest": digest,

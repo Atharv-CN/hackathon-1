@@ -11,6 +11,8 @@ from logic import b64, unb64
 class StandbyCipher:
     def __init__(self, key_b64=None):
         encoded = key_b64 if key_b64 is not None else os.environ["BACKUP_AES_KEY_B64"]
+        if isinstance(encoded, str):
+            encoded = encoded.strip()
         try:
             key = unb64(encoded)
         except (ValueError, TypeError) as exc:

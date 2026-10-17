@@ -30,6 +30,12 @@ class CryptoTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             StandbyCipher(base64.b64encode(b"too short").decode())
 
+    def test_ignores_copied_whitespace_around_key(self):
+        key = base64.b64encode(bytes(range(32))).decode()
+        cipher = StandbyCipher(" \n" + key + "\n ")
+        envelope = cipher.encrypt("TEST-REQUEST-1", b"synthetic")
+        self.assertEqual(cipher.decrypt(envelope), b"synthetic")
+
 
 if __name__ == "__main__":
     unittest.main()
