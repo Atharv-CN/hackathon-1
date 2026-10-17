@@ -33,6 +33,10 @@ def init_state() -> None:
         "payment_attempt_id": None,
         "payment_error": None,
         "payment_token": None,
+        "backup_handoff": None,
+        "backup_error": None,
+        "backup_token_id": None,
+        "simulate_primary_outage": False,
         # Handoff to the Wallet team (encrypted package only; never card details)
         "handoff_package": None,
         "handoff_code": None,

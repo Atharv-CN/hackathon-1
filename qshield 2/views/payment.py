@@ -5,7 +5,8 @@ import secrets
 import streamlit as st
 
 from core.mock_provider import MAX_AMOUNT_PAISE, MIN_AMOUNT_PAISE, TEST_CARDS, PaymentInputError, charge
-from core.token_store import TokenError, get_store
+from core.backup_client import BackupError, create_backup_handoff
+from core.token_store import TokenError, get_store, new_token
 from core.wallet_handoff import HandoffError, build_handoff, load_config, payments_fingerprint
 import relay
 
@@ -24,6 +25,7 @@ def _submit() -> None:
     ss["payment_error"] = None
     ss["payment_token"] = None
     ss["payment_result"] = None  # a failed attempt must not leave an old success on screen
+    ss["backup_handoff"] = ss["backup_error"] = ss["backup_token_id"] = None
     if not name.strip():
         ss["payment_error"] = "Enter the name on the card."
         return
@@ -38,8 +40,27 @@ def _submit() -> None:
     ss["payment_result"] = result
     ss["payment_attempt_id"] = secrets.token_urlsafe(16)  # next submit = a NEW payment
     if result.status == "succeeded":
-        _issue_token()
-        _send_to_wallet(number, expiry, name)
+        if ss.get("simulate_primary_outage"):
+            _send_to_backup(result)
+        else:
+            _issue_token()
+            if ss["payment_token"] is None:
+                _send_to_backup(result)
+            else:
+                _send_to_wallet(number, expiry, name)
+
+
+def _send_to_backup(result) -> None:
+    """Send only the simulated payment result and random token to Neon standby."""
+    ss = st.session_state
+    ss["backup_handoff"] = ss["backup_error"] = None
+    if ss.get("backup_token_id") is None:
+        ss["backup_token_id"] = (ss["payment_token"].token if ss["payment_token"] else new_token())
+    try:
+        ss["backup_handoff"] = create_backup_handoff(result, ss["backup_token_id"])
+        ss["payment_error"] = None
+    except BackupError as exc:
+        ss["backup_error"] = str(exc)
 
 
 def _send_to_wallet(number: str, expiry: str, name: str) -> None:
@@ -106,10 +127,14 @@ def show_payment() -> None:
             st.text_input("Expiry (MM/YY)", key="pay_expiry", autocomplete="off")
         with col2:
             st.text_input("CVV", type="password", max_chars=3, key="pay_cvv", autocomplete="off")
+        st.checkbox("Simulate QShield + Supabase outage (use Neon backup)",
+                    key="simulate_primary_outage")
         st.form_submit_button("Pay (test mode)", type="primary", on_click=_submit)
 
     if st.session_state.get("payment_error"):
         st.error(st.session_state["payment_error"])
+    if st.session_state.get("backup_error"):
+        st.error("Neon backup failed: " + st.session_state["backup_error"])
 
     result = st.session_state["payment_result"]
     if result is not None:
@@ -122,8 +147,18 @@ def show_payment() -> None:
 
         if result.status == "succeeded":
             token = st.session_state["payment_token"]
-            if token is None:
+            backup = st.session_state.get("backup_handoff")
+            if backup:
+                st.info("Neon backup recorded this simulated payment; Wallet verification is pending.")
+                st.code(backup["request_id"], language=None)
+                st.caption("Backup token: " + st.session_state["backup_token_id"] +
+                           " · Status: " + backup["wallet_status"] +
+                           " · No card number or CVV was sent to Render.")
+            elif token is None:
                 st.button("Create token", on_click=_issue_token, key="pay_create_token")
+                if st.session_state.get("backup_error"):
+                    st.button("Retry Neon backup", on_click=_send_to_backup,
+                              args=(result,), key="pay_retry_backup")
             else:
                 st.markdown("**Payment token**")
                 st.code(token.token, language=None)
