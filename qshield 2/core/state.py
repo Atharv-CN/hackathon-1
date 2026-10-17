@@ -27,6 +27,11 @@ def init_state() -> None:
         "last_check": None,
         "receiver_identity": None,
         "trust_store": None,
+        # Payment page (MOCK provider). Never holds card numbers, only results.
+        "payment_result": None,
+        "payment_ledger": {},
+        "payment_attempt_id": None,
+        "payment_error": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
