@@ -18,6 +18,8 @@ The backup APIs never call Supabase or QShield. Neon is a separate Postgres prov
 5. If Render accepts your free account without a card, deploy both APIs from [`render.yaml`](../render.yaml) and enter the secret values. Check each `/health`. Free web services sleep after 15 idle minutes and may take about a minute to wake, so open them before presenting.
 6. Use `demo_client.py` to create and accept a synthetic handoff first. Its INR amount (in paise) and `mockpay_` reference match the team's test payment provider. The website still needs a server-side caller before it uses this fallback.
 
+For an easier deployed check, run `python3 backup-service/verify_deployment.py` from the repository root. It asks for both Render URLs and the creator and Wallet request secrets without displaying the secrets as you type. Successful `pending` and `accepted` responses prove both services can reach Neon. It does not require the Neon connection string on your laptop.
+
 For a no-card local demo, install `requirements.txt`, put those same variables in the two terminal environments, then run `uvicorn creator:app --host 127.0.0.1 --port 8001` and `uvicorn wallet:app --host 127.0.0.1 --port 8002` from this folder. Set `CREATOR_URL=http://127.0.0.1:8001` and `WALLET_URL=http://127.0.0.1:8002` for the test client.
 
 ## What the demo proves
