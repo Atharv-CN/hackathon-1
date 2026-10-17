@@ -6,7 +6,7 @@ import struct
 import pytest
 from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
 
-from core import key_storage as ks
+import key_storage as ks
 from core import pq_transfer as pq
 
 # Small, fast parameters for tests only.

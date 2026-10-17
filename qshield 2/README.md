@@ -4,22 +4,124 @@ A 24-hour hackathon prototype for secure file sharing, built with Python and Str
 
 ## Current status (please read)
 
-## Simplified interface (17 October 2026)
+## Quantum-resistant encryption scope (17 October 2026)
 
-The app now has **Receive** and **Send** tabs. New keys default to hybrid
-X25519 + ML-KEM-768. Every new UI package uses version 1 with encrypted metadata,
+QShield can accurately claim **quantum-resistant file encryption in its local mode**, subject to the usual assumptions about ML-KEM, AES-256 and secure key handling. The recommended key uses [NIST FIPS 203 ML-KEM-1024](https://csrc.nist.gov/pubs/fips/203/final) for post-quantum key establishment and X25519 as a classical hedge. The new combined suite-4 package protocol itself has **not** been independently audited or certified. No cryptographic system is proven safe against every future attack.
+
+The app has **Receive** and **Send** tabs. New keys default to suite 4,
+X25519 + ML-KEM-1024. Every new UI package uses version 1 with encrypted metadata,
 Padmé padding and a random download name. Existing keys and packages still open.
 Padding obscures exact size; approximate size, recipient fingerprint and transfer
 timing remain observable. The app does not authenticate the sender.
 
-Relay, identity and trust-store tools are under **Advanced**. Signed-key publishing
-still requires suite 1; select that explicitly under Advanced key compatibility.
-No automatic downgrade is performed. The separate hash-check screen and Security
-Status tab are removed from the UI; core cryptographic modules remain unchanged.
+The old Ed25519 signed-key relay identity is **not quantum-resistant** and has been
+removed from the app's key-selection flow. Share a public key directly and verify
+its complete SHA-256 fingerprint over an independent channel. The relay can still
+carry encrypted packages. There is no automatic downgrade. Historical key bundles,
+trust-store code and signed-transfer code remain in `core/` for compatibility, but
+the simplified tabs do not use them.
 
 **Processing happens on the Streamlit server**, including plaintext files, key
-operations and passwords. The server must be trusted. This is not browser-only
-encryption. Keep your private-key download and password; neither can be recovered.
+operations and passwords. The server must be trusted; a hosted instance is **not
+end-to-end encrypted**. For private device-local processing, use the CLI below.
+Keep your private-key file and password; neither can be recovered.
+
+### Device-local workflow (recommended)
+
+Run these commands on the receiver's or sender's own computer after installing
+`requirements.txt`; they do not contact a server. Use separate devices for a
+two-person transfer. The receiver runs:
+
+```bash
+python qshield_local.py keygen --private-key receiver.pem --public-key receiver.pub
+```
+
+The receiver gives the sender `receiver.pub` and communicates the printed **full
+fingerprint** over a separate trusted channel (such as a phone call). The sender
+uses that fingerprint, which the CLI checks before encryption:
+
+```bash
+python qshield_local.py encrypt test.txt --public-key receiver.pub --fingerprint FULL_64_HEX_DIGIT_FINGERPRINT
+```
+
+Share the randomly named `.qshield` file. The receiver then runs:
+
+```bash
+python qshield_local.py decrypt qshield-xxxxxxxxxxxxxxxx.qshield --private-key receiver.pem --output-dir recovered
+```
+
+Passwords are prompted for, never put in command-line arguments. The recovered
+file is created only after authentication succeeds. This local v1 workflow accepts
+files under 25 MiB; it loads a whole file in memory. Use a strong, unique private
+key password and protect the local computer. A stolen receiver key can open old
+packages; ordinary packages do not prove who sent them.
+
+### Integrate QShield into a Python app
+
+Install the source package in your own Python environment from the `qshield`
+folder. The SDK needs `cryptography`; the website and relay are optional extras:
+
+```bash
+python -m pip install .
+# For the website demo too: python -m pip install '.[demo]'
+```
+
+`qshield_sdk` is the small device-local API for developers. It has four
+operations: `create_keys`, `get_fingerprint`, `encrypt_file`, and `decrypt_file`.
+The receiver creates keys on their own device:
+
+```python
+from getpass import getpass
+from qshield_sdk import create_keys
+
+receiver = create_keys("receiver.pem", "receiver.pub", getpass("Private-key password: "))
+print(receiver.fingerprint)  # tell the sender through a separate trusted channel
+```
+
+The sender gets `receiver.pub` and the **full fingerprint independently**, then
+encrypts on their own device:
+
+```python
+from pathlib import Path
+from qshield_sdk import encrypt_file, get_fingerprint
+
+public_text = Path("receiver.pub").read_text()
+print(get_fingerprint(public_text))  # display it for the human comparison
+confirmed_fingerprint = input("Full fingerprint confirmed with receiver: ")
+encrypt_file("test.txt", "delivery.qshield", public_text,
+             expected_fingerprint=confirmed_fingerprint)
+```
+
+The receiver opens it with:
+
+```python
+from getpass import getpass
+from qshield_sdk import decrypt_file
+
+recovered = decrypt_file("delivery.qshield", "receiver.pem",
+                         getpass("Private-key password: "), "recovered")
+print(recovered)
+```
+
+The SDK defaults to suite 4 and creates padded version-1 packages. Older keys
+need `allow_legacy=True` in `create_keys` or `encrypt_file`. A missing, shortened,
+or mismatched fingerprint stops before encryption and creates no package. The
+SDK does not use Streamlit or contact a relay. It currently accepts input files
+up to 25 MiB, and neither encryption nor decryption overwrites existing files.
+
+Run the independent integration example from the `qshield` folder:
+
+```bash
+python -m examples.integration_demo
+```
+
+It creates disposable receiver and sender folders, transfers only a public key
+and an encrypted package between them, and verifies the recovered test file.
+The example simulates a separate fingerprint confirmation; actual users must
+confirm the fingerprint through a trusted channel. All example files and the
+demo-only password are discarded when the program exits. The package also
+installs a `qshield-local` command for the device-local CLI. No publishing to
+PyPI is required to install this source checkout or its built wheel.
 
 Feature inventory:
 
@@ -32,18 +134,22 @@ Feature inventory:
 | ML-KEM-768 key establishment connected to the app (suite 1) | ✅ Working |
 | Hybrid X25519 + ML-KEM-768 key establishment (suite 2) | ✅ Working |
 | ML-KEM-1024 key establishment (suite 3) | ✅ Working |
+| X25519 + ML-KEM-1024 key establishment (suite 4, UI/CLI default) | ✅ Working; unaudited combination |
 | Encrypted file integrity verification (AES-GCM) | ✅ Working |
-| Claiming the whole system is "quantum-resistant" | 🚫 Not claimed (see the limits in the ML-KEM section) |
-| Relay public-key authentication (signed key bundles + QShield ID) | ✅ Working (see `docs/KEY_AUTHENTICATION.md`) |
+| Claiming quantum-resistant **local file encryption** with suite 4 and verified fingerprint | ✅ Qualified claim; see scope above |
+| Claiming the hosted app or sender identities are quantum-resistant | 🚫 Not claimed |
+| Legacy relay public-key authentication (Ed25519 signed key bundles) | 🧩 Built in `core/`, not used by the simplified UI and not quantum-resistant |
 | Sender identity verification (hybrid Ed25519 + ML-DSA-65 signatures) | 🧩 Built and tested in `core/`, not connected to the app tabs yet. Packages made by the app are still unsigned |
-| Encrypted package relay | Available under Advanced when Supabase is configured |
+| Encrypted package relay | Available under Advanced when Supabase is configured; package transport only |
+| Device-local developer API (`qshield_sdk.py`) | ✅ Working; suite 4 default, mandatory full fingerprint check |
+
 **Use test files only. Do not upload real secrets.** Encryption is connected, but this is an unaudited hackathon prototype. It does not prove who the sender is.
 
 **Team rule:** never show something as "working" unless real code exists and you have tested it. When you build a feature, update `core/security_status.py` at the same time. Do not use pretend or home-made cryptography.
 
 ## How to run it
 
-You need **Python 3.9 or newer**. Check with `python --version` (or `python3 --version`).
+You need **Python 3.10 or newer**. Check with `python --version` (or `python3 --version`).
 
 Open a terminal inside the `qshield` folder, then follow the steps.
 
@@ -83,16 +189,17 @@ Your browser opens by itself. If it does not, go to http://localhost:8501
 
 Use a harmless test file (for example a short `.txt`), never real secrets.
 
-1. In **Receive → Create keys**, enter a password and click **Create keys**.
+1. In **Receive → Create keys**, enter and repeat a unique password of at least 12 characters, then click **Create keys**.
 2. Click **Save private key** and keep that file and password private. Share only the public key.
 3. In **Send**, choose a file and paste that public key. Compare the displayed fingerprint with the receiver by phone or in person, then tick the confirmation.
-4. Click **3. Encrypt file**, download the encrypted file and share it.
+4. Click **Encrypt file**, download the encrypted file and share it. For an older key type, explicitly opt in under Advanced; the normal path uses suite 4.
 5. In **Receive → Open a file**, upload the package. Use this session’s key or upload your saved private-key file, enter its password and click **Decrypt file**.
 6. Download the recovered file only after verification succeeds. Wrong keys, passwords and modified packages are rejected.
 
 Existing deployments: replace the app source, retaining your deployment environment
 variables and Supabase configuration. Keep the same `streamlit run app.py` start
 command. Do not upload a local `venv` directory or secret files to the repository.
+
 
 ## The encryption module
 
@@ -131,18 +238,18 @@ What it does **not** do (read this before you trust it):
 | Suite | Key establishment | What it is for |
 |---|---|---|
 | 1 | ML-KEM-768 only, **no hybrid** | The original QShield format. |
-| 2 (UI default) | **X25519 + ML-KEM-768 (hybrid)** | Both secrets are joined and fed into HKDF, so an attacker has to break both. If a flaw is found in the newer algorithm (ML-KEM), X25519 still protects against attackers using ordinary computers. |
 | 2 | **X25519 + ML-KEM-768 (hybrid)** | Both secrets are joined and fed into HKDF, so an attacker has to break both. If a flaw is found in the newer algorithm (ML-KEM), X25519 still protects against attackers using ordinary computers. |
 | 3 | ML-KEM-1024 only | Higher security level (bigger keys). Same algorithm family as suite 1, so it adds safety margin but is **not** a hedge against a flaw in ML-KEM itself. |
+| 4 (UI/CLI default) | **X25519 + ML-KEM-1024 (hybrid)** | ML-KEM-1024 supplies post-quantum protection; X25519 is a hedge against a classical break of ML-KEM. The combination and package protocol are unaudited. |
 
-Be precise about what suite 2 buys you: it hedges against a *classical* break of ML-KEM. A large quantum computer breaks X25519, so against a quantum attacker suite 2 is only as strong as its ML-KEM half. The suite is chosen by the receiver when making the key pair. The public key says which suite to use, so the sender needs no setting. A key only opens packages of its own suite, and the suite is mixed into the key derivation, so nobody can downgrade a package by editing its header.
+Be precise about what hybrids buy you: X25519 hedges against a *classical* break of ML-KEM. A sufficiently capable quantum computer breaks X25519, so against such an attacker a hybrid is only as strong as its ML-KEM half. The receiver chooses the suite. The public key identifies it, and a key only opens packages for its own suite. The suite and whole header are bound into the key derivation.
 
 ```python
-private_key = generate_recipient_keypair(2)     # 1 = ML-KEM-768, 2 = hybrid, 3 = ML-KEM-1024
-public_text = public_key_to_text(private_key.public_key())   # suite 2 and 3 texts start with "QS2:" / "QS3:"
+private_key = generate_recipient_keypair(4)     # 4 = recommended hybrid ML-KEM-1024 + X25519
+public_text = public_key_to_text(private_key.public_key())   # suite 4 text starts with "QS4:"
 ```
 
-Suite 2 key files hold two password-protected PEM blocks (X25519, then ML-KEM-768). Download the file and keep it whole.
+Hybrid key files (suites 2 and 4) hold two password-protected PEM blocks (X25519, then ML-KEM). Download the file and keep it whole.
 
 ## Sending a file to a recipient (ML-KEM)
 
@@ -150,9 +257,9 @@ Suite 2 key files hold two password-protected PEM blocks (X25519, then ML-KEM-76
 
 Think of a padlock. The receiver makes a key pair. The *public* key is an open padlock that anyone can have. The *private* key is the only key that opens it, and it stays on the receiver's computer. The sender snaps the padlock shut around a fresh secret, and now both sides share that secret.
 
-It uses standard algorithms from the `cryptography` library. There is no home-made crypto:
-1. **ML-KEM-768** (NIST FIPS 203, designed to resist quantum computers) makes a shared secret and a "locked box" that only the receiver can open.
-2. **HKDF-SHA256** turns that secret into a 256-bit key.
+It uses standardized algorithms from the `cryptography` library, combined by QShield's own unaudited protocol:
+1. **ML-KEM-1024** in recommended suite 4 (NIST FIPS 203, designed to resist quantum computers) makes a shared secret and a "locked box" that only the receiver can open. X25519 contributes a separate classical secret.
+2. **HKDF-SHA256** combines the secret(s) into a 256-bit key.
 3. **AES-256-GCM** encrypts the file with that key.
 
 ```python
@@ -163,7 +270,7 @@ from core.pq_transfer import (
 )
 
 # RECEIVER, on the receiver's own computer
-private_key = generate_recipient_keypair()
+private_key = generate_recipient_keypair(4)
 save_private_key(private_key, "my_private.key", "a strong password")   # stays here
 public_text = public_key_to_text(private_key.public_key())             # safe to share
 print(public_key_fingerprint(private_key.public_key(), pretty=True))   # read this out to the sender
@@ -178,10 +285,10 @@ result = decrypt_package(package, private_key)    # result.data, result.filename
 
 If something is wrong you get `WrongRecipientError` (made for a different key) or `TransferError` (changed or damaged). Both are also a `DecryptionError`. If the installed `cryptography` cannot do ML-KEM-768 you get `PostQuantumUnavailableError`. QShield **never** quietly switches to ordinary encryption.
 
-The package (format version 1) is a small header followed by the encrypted file. The header holds a format marker, the version, the algorithm suite number, a fingerprint of the recipient's key, and the KEM locked box (1088 bytes for suite 1, 1120 for suite 2, 1568 for suite 3). The whole header is mixed into the key, so changing any part of the package makes opening it fail. A new suite number is how a future version can change algorithms without confusing old packages.
+The package (format version 1) is a small header followed by the encrypted file. The header holds a format marker, version, suite number, recipient key fingerprint, and KEM locked box (1088 bytes for suite 1, 1120 for suite 2, 1568 for suite 3, 1600 for suite 4). The whole header is mixed into the key derivation. A new suite number separates these algorithms and preserves old packages.
 
 Read these limits before you trust it:
-- **No proof of who sent it.** Anyone with the public key can make a package. Digital signatures would be needed for that. They are not built.
+- **No proof of who sent it.** Anyone with the public key can make a package. Signature code exists separately but is not connected to the UI or local CLI.
 - **Check the public key.** Compare fingerprints with the receiver by phone or in person. Otherwise someone could swap in their own public key.
 - **No forward secrecy for stored packages.** If the private key is stolen later, old packages can be opened. That is expected for files kept on disk. For live channels, see "Live sessions with forward secrecy" below.
 - Visible outside the encryption: the suite, the recipient key fingerprint, and the total package length (rounded if you use padding). The file name, exact size and time are hidden. The Supabase relay also sees when a package was uploaded.
@@ -194,7 +301,7 @@ Every `.qshield` package starts with the marker `QSHK`, then a version byte and 
 
 | Version / suite bytes | What it is | Made by | Opened by | Hides name, size, time? |
 |---|---|---|---|---|
-| 1 / 1, 2 or 3 | Whole-file package: ML-KEM-768, X25519 + ML-KEM-768 hybrid, or ML-KEM-1024, optional padding | `encrypt_for_recipient` | `decrypt_package`, `decrypt_package_file` | Yes |
+| 1 / 1, 2, 3 or 4 | Whole-file package: ML-KEM-768 or ML-KEM-1024, alone or hybrid with X25519; optional padding | `encrypt_for_recipient` | `decrypt_package`, `decrypt_package_file` | Yes |
 | 2 / 2 | **Streaming** package (large files, ML-KEM-768 keys only) | `encrypt_stream_for_recipient`, `encrypt_file_for_recipient` (default for suite 1 keys without padding) | `decrypt_package`, `decrypt_package_stream`, `decrypt_package_file` | **No** (visible, authenticated) |
 | 2 / 1 | **Signed** package (proves who sent it, ML-KEM-768 keys only) | `signed_transfer.sign_and_encrypt` | `signed_transfer.decrypt_and_verify` | Yes |
 
@@ -218,7 +325,7 @@ decrypt_package_file("m.qshield", "out/", private_key)
 - **Safe output:** decryption goes to a private temporary file and is published only after the final segment and end-of-file verify. A failure deletes the temporary file and leaves any existing destination alone.
 - **Stream APIs:** `encrypt_stream` / `decrypt_stream` and `encrypt_stream_for_recipient` / `decrypt_package_stream` work on open binary files. Their output may contain already-verified chunks before a later failure, so they are for callers that handle that (the `*_file` functions do).
 - **Not bounded-memory:** anything that takes or returns `bytes`. `decrypt_package` and `decrypt_bytes` can open the streaming formats, but they hold the result in memory.
-- **Compatibility:** older containers and packages (including the golden vectors) still open. Streaming packages are `QSHK` **version 2**. The simplified Send tab always creates version 1 packages. Details: [`docs/STREAMING_FORMAT.md`](docs/STREAMING_FORMAT.md).
+- **Compatibility:** older containers and packages (including the golden vectors) still open. Streaming packages are `QSHK` **version 2**. The browser app and older QShield versions cannot open them; the simplified Send tab always creates version 1 packages. Details: [`docs/STREAMING_FORMAT.md`](docs/STREAMING_FORMAT.md).
 - **Known gaps (streaming format only):**
   - The file name, exact size and creation time are **authenticated but not encrypted**, unlike container version 2 from `encrypt_bytes`.
   - Padding is not available.
@@ -312,7 +419,8 @@ The frozen version 2 test vector (`tests/data/golden_signed_package_v2.json`) wa
 
 ## Two-device demo (optional Supabase relay)
 
-If `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` are set, the Send and Receive tabs expose relay controls under Advanced. Without them, the app works without the relay.
+If `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` are set, the Send and Receive tabs expose relay controls under Advanced. Without them the app works exactly as before.
+
 1. In Supabase → SQL Editor, create the table:
    ```sql
    create table transfers (
@@ -325,11 +433,11 @@ If `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` are set, the Send and Receive tabs 
    alter table transfers enable row level security;
    ```
 2. Add `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` (the **secret** key) as environment variables on your host. Never commit them.
-3. Flow: **Receiver** generates keys → "Share public key" → gets a code. **Sender** enters that code, encrypts → "Send to receiver via relay" → gets a package code. **Receiver** enters the package code → "Fetch package" → decrypts.
+3. Flow: **Receiver** creates a suite-4 key → gives its public key to the sender and verifies the fingerprint over another channel. **Sender** encrypts → "Send via relay" → gives the receiver the package code. **Receiver** fetches the encrypted package and decrypts it.
 
-The relay is **not trusted**. It only stores a *signed key bundle* or an already-encrypted package. Public keys are accepted only if signed by the receiver's **QShield ID**, which the sender gets from the receiver by another channel (chat, email, in person). A relay that swaps the key is detected and the file is not encrypted. Details, threat model, rotation and limits: [`docs/KEY_AUTHENTICATION.md`](docs/KEY_AUTHENTICATION.md).
+The relay handles encrypted package transport only in the simplified app. It sees package size and timing. The UI no longer uses the older Ed25519 signed-key bundle system because Ed25519 cannot support a post-quantum authentication claim. Historical code and threat model remain in [`docs/KEY_AUTHENTICATION.md`](docs/KEY_AUTHENTICATION.md) for older integrations; those are outside the recommended workflow.
 
-Revised flow: **Receiver** generates keys → **Create QShield identity** → sends the QShield ID to the sender (not via the relay) → **Publish signed key bundle** → gets a code. **Sender** enters the QShield ID and the code, encrypts → "Send to receiver via relay" → package code. **Receiver** enters the package code → "Fetch package" → decrypts. The old unsigned `pubkey` codes are rejected. If you paste a public key by hand instead, confirm its fingerprint with the receiver; QShield cannot verify who owns it.
+For the timed presentation, follow [`docs/DEMO_RUNBOOK.md`](docs/DEMO_RUNBOOK.md).
 
 ## Run the tests
 
@@ -362,7 +470,11 @@ What the tests prove:
 
 ```
 qshield/
-├── app.py                  Start here. Sets up the page and the three tabs.
+├── app.py                  Server-based two-tab demo.
+├── qshield_local.py        Device-local, fingerprint-checked CLI.
+├── qshield_sdk.py          Four-function device-local developer API.
+├── pyproject.toml          Installable SDK package and qshield-local command.
+├── examples/               Separate app that imports the SDK (run with python -m).
 ├── requirements.txt        Packages the app needs.
 ├── requirements-dev.txt    Same, plus pytest for running the tests.
 ├── pytest.ini              Test settings.
@@ -411,4 +523,5 @@ qshield/
 | `streamlit: command not found` | Activate the environment (Step 1), then try again. |
 | `ModuleNotFoundError` | Run `pip install -r requirements.txt` again. |
 | Port 8501 is busy | Run `streamlit run app.py --server.port 8502` |
-| File is rejected as too big | The web app's limit is 25 MB (Streamlit keeps uploads in memory). Change `maxUploadSize` in `.streamlit/config.toml`, or use `encrypt_file()` / `encrypt_file_for_recipient()` from Python for large files. |
+| File watcher error on macOS | Run `streamlit run app.py --server.fileWatcherType none` to skip automatic source reload. |
+| File is rejected as too big | The simple UI, SDK and local CLI are limited to 25 MiB because private-metadata v1 packages are held in memory. Use a smaller test file. The lower-level suite-1 streaming format supports larger files but exposes name and size. |

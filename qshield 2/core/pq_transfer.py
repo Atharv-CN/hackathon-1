@@ -1,4 +1,4 @@
-"""Send a file to a recipient with ML-KEM + HKDF-SHA256 + AES-256-GCM (three suites).
+"""Send a file to a recipient with ML-KEM + HKDF-SHA256 + AES-256-GCM (four suites).
 
 THE IDEA (think of a padlock)
   1. The receiver makes a key pair. The PUBLIC key is like an open padlock:
@@ -13,7 +13,7 @@ THE IDEA (think of a padlock)
      a 256-bit AES key. The whole package header is mixed into this step.
   4. The file is encrypted with AES-256-GCM (core/file_crypto.py).
 
-THE THREE SUITES (the receiver picks one when making the key pair)
+THE FOUR SUITES (the receiver picks one when making the key pair)
   suite 1  ML-KEM-768 only. No hybrid. (The original QShield format.)
   suite 2  HYBRID: X25519 + ML-KEM-768. Two secrets are made at the same time
            and BOTH go into the HKDF input (ML-KEM secret first, then the
@@ -25,6 +25,9 @@ THE THREE SUITES (the receiver picks one when making the key pair)
   suite 3  ML-KEM-1024 only (higher security level, bigger keys). It is the
            same algorithm family as suite 1, so it is NOT a hedge against a
            flaw in ML-KEM itself. It only adds safety margin.
+  suite 4  HYBRID: X25519 + ML-KEM-1024. The default in the UI/local CLI.
+           The ML-KEM-1024 component supplies post-quantum key establishment;
+           X25519 adds a classical hedge. This new combination is not audited.
   A package records its suite in the header. A key only opens packages of its
   own suite, so nobody can trick the receiver into a weaker suite.
 
@@ -41,6 +44,7 @@ PACKAGE LAYOUT (version 1). Every field has a fixed size for its suite.
   KEM ciphertext: suite 1 = 1088 bytes (ML-KEM-768 box).
                   suite 2 = 1120 bytes (32-byte X25519 sender key + 1088-byte ML-KEM-768 box).
                   suite 3 = 1568 bytes (ML-KEM-1024 box).
+                  suite 4 = 1600 bytes (32-byte X25519 key + 1568-byte ML-KEM-1024 box).
   A new "suite" number is how future versions can change algorithms without
   confusing old packages. The recipient fingerprint tells the receiver which key
   the package is for. It is only a label: the real protection is that the AES key
@@ -50,10 +54,10 @@ PACKAGE LAYOUT (version 1). Every field has a fixed size for its suite.
 
 KEY FILES
   Suites 1 and 3: one password-protected PKCS#8 PEM block.
-  Suite 2: two password-protected PKCS#8 PEM blocks in one file (X25519 first,
-  then ML-KEM-768), both protected by the same password.
+  Suites 2 and 4: two password-protected PKCS#8 PEM blocks in one file (X25519
+  first, then the corresponding ML-KEM key), both protected by the same password.
   Public key text: suite 1 is plain text (unchanged). Suites 2 and 3 start with
-  "QS2:" or "QS3:" so the app knows which suite a pasted key belongs to.
+  "QS2:", "QS3:" or "QS4:" so the app knows which suite a pasted key belongs to.
 
 PACKAGE VERSIONS
   - Version 1 (suite 1): one AES-GCM message. encrypt_for_recipient() /
@@ -125,13 +129,15 @@ from core.file_crypto import DecryptedFile, DecryptionError
 MAGIC = b"QSHK"                  # marks "this is a QShield key-transfer package"
 VERSION = 1
 
-# Algorithm suites. All three use HKDF-SHA256 and AES-256-GCM after the KEM step.
+# Algorithm suites. All four use HKDF-SHA256 and AES-256-GCM after the KEM step.
 SUITE_MLKEM768_HKDF_SHA256_AES256GCM = 1   # ML-KEM-768 only (no hybrid)
 SUITE_X25519_MLKEM768_HKDF_SHA256_AES256GCM = 2   # hybrid
 SUITE_MLKEM1024_HKDF_SHA256_AES256GCM = 3  # ML-KEM-1024 only
+SUITE_X25519_MLKEM1024_HKDF_SHA256_AES256GCM = 4  # hybrid with ML-KEM-1024
 SUITE_MLKEM768 = SUITE_MLKEM768_HKDF_SHA256_AES256GCM
 SUITE_HYBRID_X25519_MLKEM768 = SUITE_X25519_MLKEM768_HKDF_SHA256_AES256GCM
 SUITE_MLKEM1024 = SUITE_MLKEM1024_HKDF_SHA256_AES256GCM
+SUITE_HYBRID_X25519_MLKEM1024 = SUITE_X25519_MLKEM1024_HKDF_SHA256_AES256GCM
 
 PUBLIC_KEY_SIZE = 1184           # ML-KEM-768 public key (FIPS 203)
 KEM_CIPHERTEXT_SIZE = 1088       # ML-KEM-768 ciphertext  (FIPS 203)
@@ -168,11 +174,14 @@ SUITES = {
               b"QShield v1: X25519 + ML-KEM-768 + HKDF-SHA256 + AES-256-GCM"),
     3: _Suite(3, "ML-KEM-1024", 1568, 1568,
               b"QShield v1: ML-KEM-1024 + HKDF-SHA256 + AES-256-GCM"),
+    4: _Suite(4, "X25519 + ML-KEM-1024 (hybrid)", X25519_KEY_SIZE + 1568,
+              X25519_KEY_SIZE + 1568,
+              b"QShield v1: X25519 + ML-KEM-1024 + HKDF-SHA256 + AES-256-GCM"),
 }
 KDF_LABEL = SUITES[1].kdf_label  # kept for older code and tests
 
 # Public-key text: suite 1 has no prefix (so old keys keep working).
-_TEXT_PREFIXES = {2: "QS2:", 3: "QS3:"}
+_TEXT_PREFIXES = {2: "QS2:", 3: "QS3:", 4: "QS4:"}
 
 
 def suite_name(suite: int) -> str:
@@ -182,25 +191,25 @@ def suite_name(suite: int) -> str:
     return SUITES[suite].name
 
 
-# ---- Hybrid key objects (suite 2) -------------------------------------------
+# ---- Hybrid key objects (suites 2 and 4) -------------------------------------
 @dataclass(frozen=True)
 class HybridPublicKey:
-    """Public half of a suite-2 key: an X25519 key plus an ML-KEM-768 key. Safe to share."""
+    """Public half of a hybrid key: X25519 plus ML-KEM-768 or ML-KEM-1024."""
 
     x25519: X25519PublicKey
-    mlkem: MLKEM768PublicKey
+    mlkem: MLKEM768PublicKey | MLKEM1024PublicKey
 
     def public_bytes_raw(self) -> bytes:
-        """32 bytes (X25519) followed by 1184 bytes (ML-KEM-768) = 1216 bytes."""
+        """X25519 public bytes followed by the ML-KEM public bytes."""
         return self.x25519.public_bytes_raw() + self.mlkem.public_bytes_raw()
 
 
 @dataclass(frozen=True)
 class HybridPrivateKey:
-    """Private half of a suite-2 key. Keep it on the receiving side."""
+    """Private half of a hybrid key. Keep it on the receiving side."""
 
     x25519: X25519PrivateKey
-    mlkem: MLKEM768PrivateKey
+    mlkem: MLKEM768PrivateKey | MLKEM1024PrivateKey
 
     def public_key(self) -> HybridPublicKey:
         return HybridPublicKey(self.x25519.public_key(), self.mlkem.public_key())
@@ -263,14 +272,18 @@ def _is_private_key(key) -> bool:
 
 
 def suite_of(key) -> int:
-    """The suite number (1, 2 or 3) a public or private key belongs to."""
+    """The suite number (1 through 4) a public or private key belongs to."""
     if isinstance(key, (MLKEM768PublicKey, MLKEM768PrivateKey)):
         return 1
     if isinstance(key, (HybridPublicKey, HybridPrivateKey)):
-        return 2
+        if isinstance(key.mlkem, (MLKEM768PublicKey, MLKEM768PrivateKey)):
+            return 2
+        if isinstance(key.mlkem, (MLKEM1024PublicKey, MLKEM1024PrivateKey)):
+            return 4
+        raise TypeError("A hybrid key must contain an ML-KEM-768 or ML-KEM-1024 key.")
     if isinstance(key, (MLKEM1024PublicKey, MLKEM1024PrivateKey)):
         return 3
-    raise TypeError("Not a QShield key (expected ML-KEM-768, hybrid X25519 + ML-KEM-768, or ML-KEM-1024).")
+    raise TypeError("Not a QShield key (expected ML-KEM-768 or ML-KEM-1024, with or without X25519).")
 
 
 # ---- Recipient keys ----------------------------------------------------------
@@ -279,7 +292,8 @@ def generate_recipient_keypair(suite: int = SUITE_MLKEM768):
     """Make a new recipient key pair. Keep the returned PRIVATE key on the
     receiving side. Get the public half with `.public_key()`.
 
-    suite 1 (default) = ML-KEM-768, suite 2 = X25519 + ML-KEM-768, suite 3 = ML-KEM-1024.
+    suite 1 (API default) = ML-KEM-768; suite 2 = X25519 + ML-KEM-768;
+    suite 3 = ML-KEM-1024; suite 4 = X25519 + ML-KEM-1024 (UI/CLI default).
     """
     if suite == 1:
         return MLKEM768PrivateKey.generate()
@@ -287,7 +301,9 @@ def generate_recipient_keypair(suite: int = SUITE_MLKEM768):
         return HybridPrivateKey(X25519PrivateKey.generate(), MLKEM768PrivateKey.generate())
     if suite == 3:
         return MLKEM1024PrivateKey.generate()
-    raise ValueError(f"Unknown algorithm suite: {suite}. Choose 1, 2 or 3.")
+    if suite == 4:
+        return HybridPrivateKey(X25519PrivateKey.generate(), MLKEM1024PrivateKey.generate())
+    raise ValueError(f"Unknown algorithm suite: {suite}. Choose 1, 2, 3 or 4.")
 
 
 def _fingerprint_bytes(public_key) -> bytes:
@@ -305,7 +321,7 @@ def public_key_fingerprint(public_key, pretty: bool = False) -> str:
 
 
 def public_key_to_bytes(public_key) -> bytes:
-    """The public key as raw bytes (suite 1: 1184, suite 2: 1216, suite 3: 1568). Safe to share."""
+    """The public key as raw bytes (suites 1–4: 1184, 1216, 1568, 1600). Safe to share."""
     suite_of(public_key)  # refuses things that are not QShield keys
     return public_key.public_bytes_raw()
 
@@ -322,17 +338,17 @@ def public_key_from_bytes(data: bytes, suite: int = SUITE_MLKEM768):
         )
     if suite == 1:
         return MLKEM768PublicKey.from_public_bytes(data)
-    if suite == 2:
+    if suite in (2, 4):
         return HybridPublicKey(
             X25519PublicKey.from_public_bytes(data[:X25519_KEY_SIZE]),
-            MLKEM768PublicKey.from_public_bytes(data[X25519_KEY_SIZE:]),
+            (MLKEM768PublicKey if suite == 2 else MLKEM1024PublicKey).from_public_bytes(data[X25519_KEY_SIZE:]),
         )
     return MLKEM1024PublicKey.from_public_bytes(data)
 
 
 def public_key_to_text(public_key) -> str:
     """The public key as copy-and-paste text (URL-safe base64). Safe to share.
-    Suites 2 and 3 start with 'QS2:' / 'QS3:'; suite 1 has no prefix."""
+    Suites 2–4 start with 'QS2:' / 'QS3:' / 'QS4:'; suite 1 has no prefix."""
     prefix = _TEXT_PREFIXES.get(suite_of(public_key), "")
     return prefix + base64.urlsafe_b64encode(public_key_to_bytes(public_key)).decode("ascii")
 
@@ -373,8 +389,8 @@ def _protected_pkcs8(key, password: bytes) -> bytes:
 def private_key_to_protected_pem(private_key, password) -> bytes:
     """Return the private key as password-protected PKCS#8 PEM bytes.
 
-    Suites 1 and 3 give one PEM block. Suite 2 gives two blocks (X25519, then
-    ML-KEM-768), both protected by the same password.
+    Suites 1 and 3 give one PEM block. Suites 2 and 4 give two blocks (X25519,
+    then ML-KEM), both protected by the same password.
 
     The PEM is encrypted. It is safe to download or keep in memory. Never print
     it in logs or show it on the sender's screen.
@@ -394,7 +410,7 @@ _PEM_BLOCK = re.compile(rb"-----BEGIN [A-Z0-9 ]+-----.*?-----END [A-Z0-9 ]+-----
 def load_private_key_from_bytes(data: bytes, password):
     """Load a private key from PEM bytes made by private_key_to_protected_pem().
 
-    The kind of key (suite 1, 2 or 3) is read from the file itself.
+    The kind of key (suite 1, 2, 3 or 4) is read from the file itself.
     """
     pw = _password_bytes(password)
     blocks = _PEM_BLOCK.findall(bytes(data))
@@ -408,7 +424,7 @@ def load_private_key_from_bytes(data: bytes, password):
     if len(keys) == 1 and isinstance(keys[0], (MLKEM768PrivateKey, MLKEM1024PrivateKey)):
         return keys[0]
     if (len(keys) == 2 and isinstance(keys[0], X25519PrivateKey)
-            and isinstance(keys[1], MLKEM768PrivateKey)):
+            and isinstance(keys[1], (MLKEM768PrivateKey, MLKEM1024PrivateKey))):
         return HybridPrivateKey(keys[0], keys[1])
     raise ValueError("This key file is not a QShield private key (ML-KEM-768, X25519 + ML-KEM-768, or ML-KEM-1024).")
 
@@ -439,7 +455,7 @@ def load_private_key(path, password):
 def _encapsulate(public_key) -> tuple[int, bytes, bytes]:
     """Return (suite, key material for HKDF, KEM ciphertext) for a public key.
 
-    Suite 2 runs X25519 and ML-KEM-768 side by side. The HKDF input is the
+    Suites 2 and 4 run X25519 and ML-KEM side by side. The HKDF input is the
     ML-KEM secret followed by the X25519 secret, so BOTH are needed.
     """
     if isinstance(public_key, MLKEM768PublicKey):
@@ -453,7 +469,7 @@ def _encapsulate(public_key) -> tuple[int, bytes, bytes]:
             raise ValueError("The receiver's public key is not valid (bad X25519 part).") from None
         pq_secret, pq_ciphertext = public_key.mlkem.encapsulate()
         ciphertext = ephemeral.public_key().public_bytes_raw() + pq_ciphertext
-        return 2, pq_secret + x_secret, ciphertext
+        return suite_of(public_key), pq_secret + x_secret, ciphertext
     if isinstance(public_key, MLKEM1024PublicKey):
         secret, ciphertext = public_key.encapsulate()
         return 3, secret, ciphertext
@@ -482,7 +498,7 @@ def _decapsulate(private_key, kem_ciphertext: bytes) -> bytes:
 def _derive_aes_key(shared_secret: bytes, header: bytes, suite: int = SUITE_MLKEM768) -> bytes:
     """HKDF-SHA256: turn the KEM secret(s) into a 256-bit AES key.
 
-    For suite 2 the input is the ML-KEM secret and the X25519 secret joined
+    For suites 2 and 4 the input is the ML-KEM secret and the X25519 secret joined
     together (64 bytes). The whole header (version, suite, recipient fingerprint,
     KEM ciphertext) is mixed in, so the key only works for exactly this package
     and this suite. No salt is used: the secrets are uniformly random and new for
@@ -527,10 +543,11 @@ def encrypt_for_recipient(plaintext: bytes, recipient_public_key,
 
 
 def package_suite(package: bytes) -> int:
-    """Read which KEY suite (1, 2 or 3) a package needs.
+    """Read which KEY suite (1, 2, 3 or 4) a package needs.
 
     Version 1 packages carry the suite number in the header (1 = ML-KEM-768,
-    2 = X25519 + ML-KEM-768, 3 = ML-KEM-1024). Version 2 (streaming) packages are
+    2 = X25519 + ML-KEM-768, 3 = ML-KEM-1024, 4 = X25519 + ML-KEM-1024).
+    Version 2 (streaming) packages are
     always made for an ML-KEM-768 key, so they report suite 1 (the byte stored in
     their header, 2, means "streaming", not the hybrid suite).
 
@@ -724,7 +741,7 @@ def encrypt_file_for_recipient(
         keys (suite 1) when no padding is asked for. NOTE: the file name and size are
         visible in a streaming package (see docs/STREAMING_FORMAT.md).
       - Version 1 package: whole file in memory, ~2 GB limit, file name/size/time encrypted,
-        optional padding. Used for suite 2 (hybrid) and suite 3 (ML-KEM-1024) keys, or
+        optional padding. Used for suites 2, 3 and 4, or
         when `padding` is given.
     streaming=True insists on the streaming format and raises if the key or options
     do not allow it. streaming=False insists on version 1.

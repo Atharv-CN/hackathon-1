@@ -80,7 +80,7 @@ def test_default_suite_is_still_ml_kem_768_only():
 
 
 def test_unknown_suite_is_refused_at_key_generation():
-    for bad in (0, 4, 255):
+    for bad in (0, 5, 255):
         with pytest.raises(ValueError):
             pq.generate_recipient_keypair(bad)
 
@@ -88,7 +88,7 @@ def test_unknown_suite_is_refused_at_key_generation():
 @pytest.mark.parametrize("suite", ALL_SUITES)
 def test_kdf_labels_are_different_per_suite(suite):
     labels = {s.kdf_label for s in pq.SUITES.values()}
-    assert len(labels) == 3
+    assert len(labels) == 4
     assert pq.SUITES[suite].kdf_label.startswith(b"QShield v1: ")
 
 
@@ -177,7 +177,7 @@ def test_changing_the_suite_label_cannot_downgrade_a_package(real, claimed):
 def test_unknown_suite_number_is_refused(suite):
     key = pq.generate_recipient_keypair(suite)
     package = bytearray(pq.encrypt_for_recipient(b"x", key.public_key()))
-    for bad in (0, 4, 200):
+    for bad in (0, 5, 200):
         package[5] = bad
         with pytest.raises(pq.TransferError, match="suite"):
             pq.decrypt_package(bytes(package), key)
@@ -342,7 +342,7 @@ def test_hybrid_key_file_that_is_not_exactly_x25519_then_mlkem768_is_refused():
                 one(x, pw),                                      # lone X25519 key
                 one(x, pw) + one(x, pw),                         # two X25519 keys
                 one(x, pw) + one(m, pw) + one(m, pw),            # three blocks
-                one(x, pw) + one(MLKEM1024PrivateKey.generate(), pw)):  # wrong ML-KEM size
+                one(x, pw) + one(m, pw) + one(x, pw)):  # extra block
         with pytest.raises(ValueError):
             pq.load_private_key_from_bytes(bad, "pw")
     # Different passwords on the two halves: refused as "wrong password"

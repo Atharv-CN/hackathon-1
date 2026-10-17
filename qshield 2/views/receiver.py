@@ -1,4 +1,4 @@
-"""Receiver screen: create keys and open encrypted packages."""
+"""Receiver screen: generate keys, decrypt .qshield packages, optional hash check."""
 
 from datetime import datetime
 
@@ -8,13 +8,9 @@ import relay
 from core.file_crypto import DecryptionError
 from core.file_utils import human_size
 from core.pq_transfer import TransferError, WrongRecipientError
-from core.identity import KeyAuthError
 from core.transfer_flow import (
-    create_identity_bundle,
     create_recipient_key_bundle,
     decrypt_uploaded_package,
-    open_identity_bundle,
-    sign_key_bundle,
 )
 
 
@@ -26,38 +22,35 @@ DECRYPT_FAIL_MESSAGE = (
 
 
 def _show_generate_keys() -> None:
-    st.subheader("Create your keys")
+    st.subheader("1 · Create your keys")
     st.write(
         "Make a key pair. Share only the **public** key with the sender. Keep "
         "the private key on this side, protected by a password."
     )
 
-    with st.expander("Advanced · key compatibility"):
-        st.caption(
-            "Hybrid encryption is the default. The signed-key relay currently "
-            "requires ML-KEM-768 keys."
-        )
-        suite = st.selectbox(
-            "Key type",
-            options=[2, 1, 3],
-            format_func=lambda n: {
-                2: "Hybrid (recommended)",
-                1: "ML-KEM-768 (signed-key relay)",
-                3: "ML-KEM-1024 (compatibility)",
-            }[n],
-            key="receiver_suite",
-        )
-
     password = st.text_input(
         "Password to protect your private key",
         type="password",
         key="receiver_key_password",
-        help="Required. The private key is saved only in password-protected form.",
+        help="Use a unique password of at least 12 characters. You will need it to open files.",
     )
+    confirmation = st.text_input(
+        "Repeat password", type="password", key="receiver_key_password_confirm",
+    )
+    suite = 4
+    with st.expander("Advanced · key compatibility"):
+        st.caption("New keys use ML-KEM-1024 + X25519. Choose an older type only to support an existing integration.")
+        suite = st.selectbox(
+            "Key type", options=[4, 3, 2, 1],
+            format_func=lambda n: {4: "ML-KEM-1024 + X25519 (recommended)", 3: "ML-KEM-1024", 2: "ML-KEM-768 + X25519 (older)", 1: "ML-KEM-768 (older)"}[n],
+            key="receiver_suite",
+        )
 
     if st.button("Create keys", type="primary"):
-        if not password:
-            st.error("Please enter a password to protect the private key.")
+        if len(password) < 12:
+            st.error("Use a password with at least 12 characters.")
+        elif password != confirmation:
+            st.error("Passwords do not match. Please enter them again.")
         else:
             try:
                 bundle = create_recipient_key_bundle(password, suite)
@@ -88,20 +81,9 @@ def _show_generate_keys() -> None:
     st.write("**Public-key fingerprint:**")
     st.code(keys["fingerprint_pretty"], language=None)
     st.caption(
-        "Sending the public key by hand? The sender should confirm this fingerprint "
-        "over a separate channel."
+        "The sender must confirm this fingerprint with you through another channel "
+        "before encrypting. A pasted key alone does not establish your identity."
     )
-
-    with st.expander("Advanced · signed-key relay"):
-        if keys.get("suite", 1) != 1:
-            st.caption(
-                "These keys use hybrid encryption or ML-KEM-1024. Share the public "
-                "key directly. Signed-key publishing requires a separate ML-KEM-768 "
-                "key pair from Advanced key compatibility."
-            )
-        else:
-            _show_relay_publish(keys)
-
     st.download_button(
         "Save private key",
         data=keys["protected_pem"],
@@ -110,97 +92,15 @@ def _show_generate_keys() -> None:
         key="download_private_key",
     )
     st.warning(
-        "Keep this key file and its password safe. You need both to open future "
-        "files. Lost keys cannot be recovered."
+        "Keep this key file and its password safe. You need both to open future files. Lost keys cannot be recovered."
     )
-
-
-def _show_relay_publish(keys: dict) -> None:
-    """Share a signed key bundle through the optional relay."""
-    if not relay.is_configured():
-        return
-
-    st.markdown("**Share through the relay (signed)**")
-    ident = st.session_state.get("receiver_identity")
-    password = st.session_state.get("receiver_key_password") or ""
-
-    if ident is None:
-        st.caption(
-            "Create a QShield identity once. Give your QShield ID to the sender "
-            "by chat, email or in person (not through the relay). It lets them "
-            "verify your key."
-        )
-        if st.button("Create QShield identity", key="create_identity"):
-            if not password:
-                st.error("Enter the password above first; it protects your identity key.")
-            else:
-                try:
-                    st.session_state["receiver_identity"] = vars(
-                        create_identity_bundle(password)
-                    )
-                except Exception as exc:
-                    st.error(str(exc))
-                else:
-                    st.rerun()
-
-        restore = st.file_uploader(
-            "Or restore a saved identity (.pem)",
-            type=["pem"],
-            key="identity_restore",
-        )
-        if restore is not None and st.button(
-            "Restore identity", key="restore_identity"
-        ):
-            try:
-                st.session_state["receiver_identity"] = vars(
-                    open_identity_bundle(restore.getvalue(), password)
-                )
-            except ValueError as exc:
-                st.error(str(exc))
-            else:
-                st.rerun()
-        return
-
-    st.write("**Your QShield ID** (safe to share outside the relay):")
-    st.code(ident["qshield_id"], language=None)
-    st.download_button(
-        "Download password-protected identity key",
-        data=ident["protected_pem"],
-        file_name="qshield-identity.pem",
-        mime="application/x-pem-file",
-        key="download_identity_key",
-    )
-
-    if st.button("Publish signed key bundle to relay", key="relay_publish_bundle"):
-        if not password:
-            st.error("Enter your key password above to sign the bundle.")
-            return
-        try:
-            envelope, seq = sign_key_bundle(
-                ident["protected_pem"],
-                password,
-                keys["public_text"],
-                previous_seq=keys.get("bundle_seq", 0),
-            )
-            keys["relay_code"] = relay.put("keybundle", envelope)
-            keys["bundle_seq"] = seq
-        except (relay.RelayError, ValueError, KeyAuthError) as exc:
-            st.error(str(exc))
-
-    if keys.get("relay_code"):
-        st.write("**Receiver code** (give this to the sender):")
-        st.code(keys["relay_code"], language=None)
 
 
 def _show_relay_fetch() -> None:
-    """Fetch an encrypted package from the optional relay."""
+    """Optional: fetch an encrypted package the sender left on the relay."""
     if not relay.is_configured():
         return
-
-    code = st.text_input(
-        "Package code from the sender (optional)",
-        key="receiver_package_code",
-    )
+    code = st.text_input("Package code from the sender (optional)", key="receiver_package_code")
     if st.button("Fetch package from relay", key="relay_fetch_package"):
         _clear_recovered()
         st.session_state["fetched_package"] = None
@@ -209,22 +109,15 @@ def _show_relay_fetch() -> None:
         except relay.RelayError as exc:
             st.error(str(exc))
             return
-
         if data is None:
+            st.session_state["fetched_package"] = None
             st.error("No package found for that code. Check it and try again.")
         else:
-            st.session_state["fetched_package"] = {
-                "name": name or "package.qshield",
-                "data": data,
-            }
+            st.session_state["fetched_package"] = {"name": name or "package.qshield", "data": data}
             st.success(f"Fetched {name or 'package'} ({human_size(len(data))}).")
-
     fetched = st.session_state.get("fetched_package")
     if fetched is not None:
-        st.caption(
-            f"Using fetched package: **{fetched['name']}** "
-            "(an uploaded file takes priority)."
-        )
+        st.caption(f"Using fetched package: **{fetched['name']}** (an uploaded file takes priority).")
 
 
 def _protected_pem_for_decrypt(source: str):
@@ -243,7 +136,7 @@ def _protected_pem_for_decrypt(source: str):
 
 
 def _show_decrypt_section() -> None:
-    st.subheader("Open an encrypted file")
+    st.subheader("3 · Open an encrypted file")
     st.write(
         "Upload the encrypted package. Unlock it with your private key. "
         "If the key is wrong or the package was modified, nothing is released."
@@ -255,34 +148,26 @@ def _show_decrypt_section() -> None:
     package_file = st.file_uploader(
         "Upload a .qshield package",
         type=["qshield"],
-        key="receiver_package_upload",
-        on_change=_clear_recovered,
+        key="receiver_package_upload", on_change=_clear_recovered,
     )
 
-    sources = (
-        ["This session's generated key", "Upload a password-protected key file"]
-        if st.session_state.get("recipient_keys")
-        else ["Upload a password-protected key file"]
-    )
     source = st.radio(
         "Private key to use",
-        sources,
-        key="receiver_key_source",
-        on_change=_clear_recovered,
+        (["This session's generated key", "Upload a password-protected key file"]
+         if st.session_state.get("recipient_keys") else ["Upload a password-protected key file"]),
+        key="receiver_key_source", on_change=_clear_recovered,
     )
     if source == "Upload a password-protected key file":
         st.file_uploader(
             "Password-protected private key (.pem)",
             type=["pem", "key"],
-            key="receiver_key_file_upload",
-            on_change=_clear_recovered,
+            key="receiver_key_file_upload", on_change=_clear_recovered,
         )
 
     key_password = st.text_input(
         "Private key password",
         type="password",
-        key="receiver_decrypt_password",
-        on_change=_clear_recovered,
+        key="receiver_decrypt_password", on_change=_clear_recovered,
     )
 
     if st.button("Decrypt file", type="primary"):
@@ -295,7 +180,6 @@ def _show_decrypt_section() -> None:
         else:
             st.error("Please upload a .qshield package or fetch one with a package code.")
             return
-
         if not key_password:
             st.error("Please enter the password for your private key.")
             return
@@ -304,18 +188,13 @@ def _show_decrypt_section() -> None:
         if pem is None:
             return
 
+        st.session_state["recovered_file"] = None
         st.session_state["last_decrypt_ok"] = False
+
         try:
             result = decrypt_uploaded_package(package_bytes, pem, key_password)
-        except (
-            WrongRecipientError,
-            TransferError,
-            DecryptionError,
-            ValueError,
-            TypeError,
-        ) as exc:
+        except (WrongRecipientError, TransferError, DecryptionError, ValueError, TypeError):
             st.error(DECRYPT_FAIL_MESSAGE)
-            st.caption(str(exc))
             return
 
         st.session_state["last_decrypt_ok"] = True
@@ -342,18 +221,13 @@ def _show_decrypt_section() -> None:
     )
 
 
-def _clear_recovered() -> None:
+def _clear_recovered():
     st.session_state["recovered_file"] = None
     st.session_state["last_decrypt_ok"] = None
 
 
 def show_receiver() -> None:
-    action = st.radio(
-        "What would you like to do?",
-        ["Create keys", "Open a file"],
-        horizontal=True,
-        label_visibility="collapsed",
-    )
+    action = st.radio("What would you like to do?", ["Create keys", "Open a file"], horizontal=True, label_visibility="collapsed")
     if action == "Create keys":
         _show_generate_keys()
     else:

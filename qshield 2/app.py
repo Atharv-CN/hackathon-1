@@ -13,8 +13,8 @@ h1 {letter-spacing: -0.04em;}
 .stButton button, .stDownloadButton button {border-radius: 10px;}
 </style>""", unsafe_allow_html=True)
 st.title("🛡️ QShield")
-st.write("A private file. The right receiver. Three simple steps.")
-st.caption("Server-based prototype: this server processes files, keys and passwords. Use test files only.")
+st.write("**1. Create keys** → **2. Encrypt a file** → **3. Open it**")
+st.caption("Demo with test files only. This server handles files, keys and passwords; for private device-local use, install the Python SDK or use qshield-local. The protocol is unaudited.")
 receive, send = st.tabs(["Receive", "Send"])
 with receive:
     show_receiver()

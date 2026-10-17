@@ -106,4 +106,6 @@ def test_security_status_marks_connected_crypto_as_working():
     assert rows["Encrypted file integrity verification"]["Status"] == WORKING
     assert "not connected" not in rows["File encryption (AES-256-GCM)"]["Details"].lower()
     assert rows["Sender identity verification"]["Status"] != WORKING
-    assert rows["Network file transfer"]["Status"] != WORKING
+    assert rows["Encrypted package network relay"]["Status"] == WORKING
+    assert rows["Legacy relay public-key authentication (Ed25519 signed key bundles)"]["Status"] != WORKING
+    assert rows["Recommended suite 4 (X25519 + ML-KEM-1024 + HKDF-SHA256)"]["Status"] == WORKING
