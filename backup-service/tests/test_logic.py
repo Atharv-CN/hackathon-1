@@ -14,9 +14,9 @@ class LogicTests(unittest.TestCase):
         self.payload = {
             "request_id": "TEST-REQUEST-42",
             "token_id": "ptok_" + "a" * 32,
-            "provider_reference": "TEST-PROVIDER-42",
-            "amount_minor": 4900,
-            "currency": "USD",
+            "provider_reference": "mockpay_" + "a" * 16,
+            "amount_minor": 49900,
+            "currency": "INR",
             "payment_status": "succeeded",
         }
 
@@ -24,12 +24,18 @@ class LogicTests(unittest.TestCase):
         self.assertEqual(validate_handoff(self.payload), self.payload)
         for change in (
             {"provider_reference": "4242424242424242"},
+            {"provider_reference": "TEST-PROVIDER-42"},
+            {"currency": "EUR"},
+            {"currency": "USD"},
             {"payment_status": "pending"},
             {"amount_minor": True},
             {"card_number": "4242424242424242"},
         ):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 validate_handoff({**self.payload, **change})
+
+        usd = {**self.payload, "provider_reference": "TEST-PROVIDER-42", "currency": "USD"}
+        self.assertEqual(validate_handoff(usd), usd)
 
     def test_canonical_digest_is_order_independent(self):
         reversed_payload = dict(reversed(list(self.payload.items())))

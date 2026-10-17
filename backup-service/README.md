@@ -16,7 +16,7 @@ The backup APIs never call Supabase or QShield. Neon is a separate Postgres prov
 3. Generate one AES key: `python3 -c 'import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())'`. Put the same output in `BACKUP_AES_KEY_B64` on both APIs. Changing it makes old backup records unreadable.
 4. Generate two different random request secrets. Put `PRIMARY_TO_BACKUP_SECRET` on the creator API and on the QShield demo caller. Put `WALLET_TO_BACKUP_SECRET` on the Wallet API and its trusted test caller. Never expose either to browser code.
 5. If Render accepts your free account without a card, deploy both APIs from [`render.yaml`](../render.yaml) and enter the secret values. Check each `/health`. Free web services sleep after 15 idle minutes and may take about a minute to wake, so open them before presenting.
-6. Use `demo_client.py` to create and accept a synthetic handoff first. The existing GitHub checkout uses INR and `mockpay_` references; this API currently accepts USD and `TEST-` references. Connect those two contracts in a separate checkout integration before claiming the website uses this fallback.
+6. Use `demo_client.py` to create and accept a synthetic handoff first. Its INR amount (in paise) and `mockpay_` reference match the team's test payment provider. The website still needs a server-side caller before it uses this fallback.
 
 For a no-card local demo, install `requirements.txt`, put those same variables in the two terminal environments, then run `uvicorn creator:app --host 127.0.0.1 --port 8001` and `uvicorn wallet:app --host 127.0.0.1 --port 8002` from this folder. Set `CREATOR_URL=http://127.0.0.1:8001` and `WALLET_URL=http://127.0.0.1:8002` for the test client.
 
@@ -25,7 +25,7 @@ For a no-card local demo, install `requirements.txt`, put those same variables i
 The creator accepts a synthetic payload such as:
 
 ```json
-{"request_id":"TEST-REQUEST-1042","token_id":"ptok_abcdefghijklmnopqrstuvwxyzABCDEF","provider_reference":"TEST-PAY-1042","amount_minor":4900,"currency":"USD","payment_status":"succeeded"}
+{"request_id":"TEST-REQUEST-1042","token_id":"ptok_abcdefghijklmnopqrstuvwxyzABCDEF","provider_reference":"mockpay_abcdefghijklmnop","amount_minor":49900,"currency":"INR","payment_status":"succeeded"}
 ```
 
 It requires `X-Timestamp` and `X-Signature`, an HMAC-SHA256 over `timestamp + "." + URL_path + "." + exact_request_body` using `PRIMARY_TO_BACKUP_SECRET`. Requests expire after five minutes. A repeated request ID with the same body returns the original row; changing its body returns 409. The response route is `neon_standby`.

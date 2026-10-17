@@ -44,9 +44,9 @@ def main():
              os.environ["PRIMARY_TO_BACKUP_SECRET"], {
                  "request_id": args.request_id,
                  "token_id": args.token_id,
-                 "provider_reference": "TEST-PROVIDER-" + args.request_id[5:],
-                 "amount_minor": 4900,
-                 "currency": "USD",
+                 "provider_reference": "mockpay_" + secrets.token_urlsafe(12),
+                 "amount_minor": 49900,
+                 "currency": "INR",
                  "payment_status": "succeeded",
              })
     else:
