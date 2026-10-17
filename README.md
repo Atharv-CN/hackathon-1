@@ -1,4 +1,4 @@
-# QShield on Vercel
+# QShield
 
 This repository contains a Python Streamlit prototype in `qshield 2/`. Vercel cannot run that long-lived Streamlit application as an ordinary Vite project. The repository root now contains a browser version of the sender and receiver workflow. It builds to static assets and requires no server, database, environment variables, or account.
 

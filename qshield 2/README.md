@@ -37,14 +37,13 @@ Feature inventory:
 | Relay public-key authentication (signed key bundles + QShield ID) | ✅ Working (see `docs/KEY_AUTHENTICATION.md`) |
 | Sender identity verification (hybrid Ed25519 + ML-DSA-65 signatures) | 🧩 Built and tested in `core/`, not connected to the app tabs yet. Packages made by the app are still unsigned |
 | Encrypted package relay | Available under Advanced when Supabase is configured |
-
 **Use test files only. Do not upload real secrets.** Encryption is connected, but this is an unaudited hackathon prototype. It does not prove who the sender is.
 
 **Team rule:** never show something as "working" unless real code exists and you have tested it. When you build a feature, update `core/security_status.py` at the same time. Do not use pretend or home-made cryptography.
 
 ## How to run it
 
-You need **Python 3.10 or newer**. Check with `python --version` (or `python3 --version`).
+You need **Python 3.9 or newer**. Check with `python --version` (or `python3 --version`).
 
 Open a terminal inside the `qshield` folder, then follow the steps.
 
@@ -95,7 +94,6 @@ Existing deployments: replace the app source, retaining your deployment environm
 variables and Supabase configuration. Keep the same `streamlit run app.py` start
 command. Do not upload a local `venv` directory or secret files to the repository.
 
-
 ## The encryption module
 
 `core/file_crypto.py` encrypts and decrypts files with **AES-256-GCM** using the well-known `cryptography` library. It contains no home-made algorithms.
@@ -133,6 +131,7 @@ What it does **not** do (read this before you trust it):
 | Suite | Key establishment | What it is for |
 |---|---|---|
 | 1 | ML-KEM-768 only, **no hybrid** | The original QShield format. |
+| 2 (UI default) | **X25519 + ML-KEM-768 (hybrid)** | Both secrets are joined and fed into HKDF, so an attacker has to break both. If a flaw is found in the newer algorithm (ML-KEM), X25519 still protects against attackers using ordinary computers. |
 | 2 | **X25519 + ML-KEM-768 (hybrid)** | Both secrets are joined and fed into HKDF, so an attacker has to break both. If a flaw is found in the newer algorithm (ML-KEM), X25519 still protects against attackers using ordinary computers. |
 | 3 | ML-KEM-1024 only | Higher security level (bigger keys). Same algorithm family as suite 1, so it adds safety margin but is **not** a hedge against a flaw in ML-KEM itself. |
 
@@ -219,7 +218,7 @@ decrypt_package_file("m.qshield", "out/", private_key)
 - **Safe output:** decryption goes to a private temporary file and is published only after the final segment and end-of-file verify. A failure deletes the temporary file and leaves any existing destination alone.
 - **Stream APIs:** `encrypt_stream` / `decrypt_stream` and `encrypt_stream_for_recipient` / `decrypt_package_stream` work on open binary files. Their output may contain already-verified chunks before a later failure, so they are for callers that handle that (the `*_file` functions do).
 - **Not bounded-memory:** anything that takes or returns `bytes`. `decrypt_package` and `decrypt_bytes` can open the streaming formats, but they hold the result in memory.
-- **Compatibility:** older containers and packages (including the golden vectors) still open. Streaming packages are `QSHK` **version 2**. The browser app and older QShield versions cannot open them; the simplified Send tab always creates version 1 packages. Details: [`docs/STREAMING_FORMAT.md`](docs/STREAMING_FORMAT.md).
+- **Compatibility:** older containers and packages (including the golden vectors) still open. Streaming packages are `QSHK` **version 2**. The simplified Send tab always creates version 1 packages. Details: [`docs/STREAMING_FORMAT.md`](docs/STREAMING_FORMAT.md).
 - **Known gaps (streaming format only):**
   - The file name, exact size and creation time are **authenticated but not encrypted**, unlike container version 2 from `encrypt_bytes`.
   - Padding is not available.
@@ -313,8 +312,7 @@ The frozen version 2 test vector (`tests/data/golden_signed_package_v2.json`) wa
 
 ## Two-device demo (optional Supabase relay)
 
-If `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` are set, the Send and Receive tabs expose relay controls under Advanced. Without them the app works exactly as before.
-
+If `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` are set, the Send and Receive tabs expose relay controls under Advanced. Without them, the app works without the relay.
 1. In Supabase → SQL Editor, create the table:
    ```sql
    create table transfers (
