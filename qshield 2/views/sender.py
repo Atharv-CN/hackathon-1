@@ -149,7 +149,6 @@ def show_sender() -> None:
             "only hides it from the downloaded package's filename."
         ),
     )
-        )
 
     if uploaded is not None:
         data = uploaded.getvalue()

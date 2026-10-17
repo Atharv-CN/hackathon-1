@@ -527,9 +527,14 @@ def encrypt_for_recipient(plaintext: bytes, recipient_public_key,
 
 
 def package_suite(package: bytes) -> int:
-    """Read the suite number from a package header (1, 2 or 3).
+    """Read which KEY suite (1, 2 or 3) a package needs.
 
-    Raises TransferError if this is not a QShield package or the suite is unknown.
+    Version 1 packages carry the suite number in the header (1 = ML-KEM-768,
+    2 = X25519 + ML-KEM-768, 3 = ML-KEM-1024). Version 2 (streaming) packages are
+    always made for an ML-KEM-768 key, so they report suite 1 (the byte stored in
+    their header, 2, means "streaming", not the hybrid suite).
+
+    Raises TransferError if this is not a QShield package or it is unknown.
     This only reads a label; it opens nothing.
     """
     package = bytes(package)
@@ -538,6 +543,10 @@ def package_suite(package: bytes) -> int:
     magic, version, suite, _ = _PREFIX.unpack_from(package, 0)
     if magic != MAGIC:
         raise TransferError("This is not a QShield transfer package.")
+    if version == VERSION_STREAM:
+        if suite != SUITE_MLKEM768_HKDF_SHA256_AES256GCM_STREAM:
+            raise TransferError(f"Unsupported algorithm suite for package version {version}: {suite}.")
+        return SUITE_MLKEM768
     if version != VERSION:
         raise TransferError(f"Unsupported package version: {version}.")
     if suite not in SUITES:
@@ -564,40 +573,27 @@ def decrypt_package(package: bytes, recipient_private_key) -> DecryptedFile:
     key_suite = suite_of(recipient_private_key)
     if suite != key_suite:
         raise TransferError(
-            f"This package uses algorithm suite {suite} ({SUITES[suite].name}) but your "
+            f"This package needs a suite {suite} key ({SUITES[suite].name}) but your "
             f"key is for suite {key_suite} ({SUITES[key_suite].name}). Use the matching "
             "key file. If you did, the package was changed."
         )
+
+    if package[4] == VERSION_STREAM:
+        # Streaming package (version 2): opened in memory here because this function
+        # returns bytes. Use decrypt_package_file / decrypt_package_stream for bounded memory.
+        sink = io.BytesIO()
+        result = _decrypt_stream_package(io.BytesIO(package), sink, recipient_private_key)
+        return DecryptedFile(
+            filename=result.filename,
+            data=sink.getvalue(),
+            metadata=result.metadata,
+        )
+
     header_size = SUITES[suite].header_size
     if len(package) < header_size:
         raise TransferError("This is too short to be a QShield transfer package.")
 
-magic, version, suite, fingerprint = _PREFIX.unpack_from(package, 0)
-
-if magic != MAGIC:
-    raise TransferError("This is not a QShield transfer package.")
-
-if version == VERSION_STREAM:
-    if suite != SUITE_MLKEM768_HKDF_SHA256_AES256GCM_STREAM:
-        raise TransferError(
-            f"Unsupported algorithm suite for package version {version}: {suite}."
-        )
-
-    if suite_of(recipient_private_key) != suite:
-        raise TransferError("This package requires a matching recipient key.")
-
-    sink = io.BytesIO()
-    result = _decrypt_stream_package(
-        io.BytesIO(package), sink, recipient_private_key
-    )
-    return DecryptedFile(
-        filename=result.filename,
-        data=sink.getvalue(),
-        metadata=result.metadata,
-    )
-
-if version != VERSION:
-    raise TransferError(f"Unsupported package version: {version}.")
+    fingerprint = _PREFIX.unpack_from(package, 0)[3]
     own_fingerprint = _fingerprint_bytes(recipient_private_key.public_key())
     if not hmac.compare_digest(fingerprint, own_fingerprint):
         raise WrongRecipientError(
@@ -717,30 +713,54 @@ def encrypt_file_for_recipient(
     recipient_public_key,
     overwrite: bool = False,
     padding=None,
+    *,
+    streaming=None,
+    segment_size: int = file_crypto.DEFAULT_SEGMENT_SIZE,
 ) -> Path:
-    """Encrypt a file for a recipient and write the package."""
-    input_path = Path(input_path)
-    output_path = Path(output_path)
+    """Encrypt a file for a recipient and write the package.
 
-    package = encrypt_for_recipient(
-        input_path.read_bytes(),
-        recipient_public_key,
-        filename=input_path.name,
-        padding=padding,
-    )
+    streaming=None (default) picks the best format for the key and options:
+      - STREAMING package (version 2): bounded memory, no 2 GB limit. Used for ML-KEM-768
+        keys (suite 1) when no padding is asked for. NOTE: the file name and size are
+        visible in a streaming package (see docs/STREAMING_FORMAT.md).
+      - Version 1 package: whole file in memory, ~2 GB limit, file name/size/time encrypted,
+        optional padding. Used for suite 2 (hybrid) and suite 3 (ML-KEM-1024) keys, or
+        when `padding` is given.
+    streaming=True insists on the streaming format and raises if the key or options
+    do not allow it. streaming=False insists on version 1.
+    The package is written to a private temporary file and moved into place only when
+    complete; an existing output is never replaced unless overwrite=True.
+    """
+    input_path, output_path = Path(input_path), Path(output_path)
+    can_stream = isinstance(recipient_public_key, MLKEM768PublicKey) and padding in (None, "none")
+    if streaming is None:
+        streaming = can_stream
+    elif streaming and not can_stream:
+        raise ValueError(
+            "The streaming package format needs an ML-KEM-768 (suite 1) key and no padding. "
+            "Use streaming=False for hybrid or ML-KEM-1024 keys, or to add padding."
+        )
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    if not overwrite and (
-        output_path.exists() or output_path.is_symlink()
-    ):
+    if not overwrite and (output_path.exists() or output_path.is_symlink()):
         raise FileExistsError(str(output_path))
-
-    with open(output_path, "xb" if not overwrite else "wb") as dst:
-        dst.write(package)
-
-    return output_path
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if not streaming:
+        package = encrypt_for_recipient(
+            input_path.read_bytes(), recipient_public_key,
+            filename=input_path.name, padding=padding,
+        )
+        out, temp_path = file_crypto.create_private_temp(output_path.parent)
+        try:
+            with out:
+                out.write(package)
+                file_crypto.sync_temp(out)
+            file_crypto.publish(temp_path, output_path, overwrite)
+        except BaseException:
+            file_crypto._discard(temp_path)
+            raise
+        return output_path
+
     with open(input_path, "rb") as src:
         st = os.fstat(src.fileno())
         size = st.st_size if stat.S_ISREG(st.st_mode) else None   # pipes/FIFOs: length unknown in advance
