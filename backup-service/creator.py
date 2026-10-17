@@ -4,6 +4,7 @@ import json
 import logging
 import os
 
+import psycopg
 from fastapi import FastAPI, Header, HTTPException, Request
 from crypto import StandbyCipher
 from logic import TEST_ID, authenticate, canonical, request_digest, validate_handoff
@@ -11,6 +12,20 @@ from storage import ConflictError, NeonStore
 
 app = FastAPI(title="QShield standby creator")
 logger = logging.getLogger("uvicorn.error")
+
+
+def database_failure(exc):
+    """Report a useful setup category without returning Neon credentials to clients."""
+    logger.error("Backup database operation failed", exc_info=exc)
+    if isinstance(exc, KeyError):
+        detail = "BACKUP_DATABASE_URL is missing on the creator service."
+    elif isinstance(exc, psycopg.errors.UndefinedTable):
+        detail = "Neon table backup_handoffs is missing in this database."
+    elif isinstance(exc, psycopg.OperationalError):
+        detail = "Could not connect to Neon. Check BACKUP_DATABASE_URL on the creator service."
+    else:
+        detail = "Neon database operation failed. Check the creator runtime logs."
+    raise HTTPException(503, detail) from exc
 
 
 @app.get("/health")
@@ -26,7 +41,10 @@ def get_handoff(request_id: str, request: Request, x_timestamp: str = Header(def
         raise HTTPException(401, "Invalid or expired backend signature.")
     if not TEST_ID.fullmatch(request_id):
         raise HTTPException(400, "Invalid test request ID.")
-    data = NeonStore().get(request_id)
+    try:
+        data = NeonStore().get(request_id)
+    except Exception as exc:
+        database_failure(exc)
     if data is None:
         raise HTTPException(404, "Unknown handoff.")
     return {"request_id": request_id, "route": "neon_standby",
@@ -45,16 +63,23 @@ async def create_handoff(request: Request, x_timestamp: str = Header(default="")
     except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise HTTPException(400, str(exc)) from exc
 
-    store = NeonStore()
     digest = request_digest(payload)
-    prior = store.get(payload["request_id"])
+    try:
+        store = NeonStore()
+        prior = store.get(payload["request_id"])
+    except Exception as exc:
+        database_failure(exc)
     if prior is not None:
         if prior.get("request_digest") != digest:
             raise HTTPException(409, "Request ID already belongs to a different payment.")
         return {"request_id": payload["request_id"], "route": "neon_standby",
                 "wallet_status": prior["wallet_status"], "created": False}
 
-    envelope = StandbyCipher().encrypt(payload["request_id"], canonical(payload))
+    try:
+        envelope = StandbyCipher().encrypt(payload["request_id"], canonical(payload))
+    except (KeyError, ValueError) as exc:
+        logger.error("Backup encryption configuration failed", exc_info=exc)
+        raise HTTPException(503, "Check BACKUP_AES_KEY_B64 on the creator service.") from exc
     record = {
         **envelope,
         "request_digest": digest,
@@ -66,11 +91,16 @@ async def create_handoff(request: Request, x_timestamp: str = Header(default="")
         store.create(record)
     except ConflictError:
         # A concurrent identical retry may have won the unique request ID.
-        prior = store.get(payload["request_id"])
+        try:
+            prior = store.get(payload["request_id"])
+        except Exception as exc:
+            database_failure(exc)
         if prior is None or prior.get("request_digest") != digest:
             raise HTTPException(409, "Request ID already belongs to a different payment.")
         return {"request_id": payload["request_id"], "route": "neon_standby",
                 "wallet_status": prior["wallet_status"], "created": False}
+    except Exception as exc:
+        database_failure(exc)
     logger.info("Backup handoff created request_id=%s", payload["request_id"])
     return {"request_id": payload["request_id"], "route": "neon_standby",
             "wallet_status": "pending", "created": True}
