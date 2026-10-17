@@ -85,9 +85,11 @@ def show_sender() -> None:
         "for (ML-KEM-768, X25519 + ML-KEM-768, or ML-KEM-1024) with AES-256-GCM."
     )
     st.caption(
-        "Encryption hides the file contents, the file name, the exact size and the "
-        "time from anyone who does not have the receiver's private key. The package "
-        "length is still visible unless you add padding. It does **not** prove who you are."
+        "Encryption hides the file contents from anyone who does not have the "
+        "receiver's private key. **Version 1 packages** (tick the box below, or use a "
+        "hybrid / ML-KEM-1024 key) also hide the file name, exact size and time; the "
+        "package length stays visible unless you add padding. The default **streaming "
+        "package** (ML-KEM-768 keys) shows the file name and size. It does **not** prove who you are."
     )
 
     uploaded = st.file_uploader("Choose a file to encrypt", key="sender_upload")

@@ -1,4 +1,8 @@
 streamlit>=1.35
 # ML-KEM-768 support needs a recent cryptography. Tested with 50.0.1.
+# core/signatures.py also needs ML-DSA-65, which cryptography has had since 47.0.
+# Both also need a cryptography build whose crypto backend supports them. If yours does not, QShield
+# stops with a clear error instead of weakening anything. Self-check:
+#   python -c "from cryptography.hazmat.primitives.asymmetric import mldsa, mlkem; mldsa.MLDSA65PrivateKey.generate(); mlkem.MLKEM768PrivateKey.generate(); print('ok')"
 cryptography>=50.0
 supabase
