@@ -26,6 +26,8 @@ The draft branch adds a server-side caller to the Streamlit payment page. Set `B
 
 In the Pay form, tick **Simulate QShield + Supabase outage** to send a successful mock payment directly to Neon. If Supabase token creation actually fails, the page also tries the backup automatically. The request includes only the mock provider reference, INR amount, random token, and test status; it excludes the card number, expiry, CVV, and cardholder name. The page shows the backup request ID while Wallet verification is pending. The separate Wallet API is exercised by `verify_deployment.py`; the QShield Wallet tab does not accept Neon handoffs.
 
+To accept the specific request shown on the Pay page, run `python3 backup-service/verify_deployment.py --accept TEST-...` from the repository root, replacing `TEST-...` with the displayed request ID. The helper asks only for the Wallet URL and Wallet request secret; it never asks for a card or Neon credential.
+
 For a no-card local demo, install `requirements.txt`, put those same variables in the two terminal environments, then run `uvicorn creator:app --host 127.0.0.1 --port 8001` and `uvicorn wallet:app --host 127.0.0.1 --port 8002` from this folder. Set `CREATOR_URL=http://127.0.0.1:8001` and `WALLET_URL=http://127.0.0.1:8002` for the test client.
 
 ## What the demo proves
